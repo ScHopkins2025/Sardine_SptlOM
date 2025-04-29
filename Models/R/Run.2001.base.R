@@ -1,20 +1,47 @@
 rm(list=ls())  # Clears environment
 gc()  # Runs garbage collection
 
-# Install r4ss
+#-------------------------------------------------------------
+# If installing r4ss from github 
+#-------------------------------------------------------------
+
 # devtools::install_github("https://github.com/r4ss/r4ss.git")
 
-library("tidyverse")
-library("r4ss")
-library("here")
+#-------------------------------------------------------------
+# Libraries to load
+#-------------------------------------------------------------
+
+load.lib <- c("tidyverse", "r4ss", "here")
+
+# If library is not installed, intall library and dependancies
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+#-------------------------------------------------------------
+# Set relative path
+#-------------------------------------------------------------
 
 wd <- here()
 
-files <- list.files(here(wd, "R", "functions"), full.names = TRUE)
-lapply(files, source)
+#-------------------------------------------------------------
+# If loading functions, source them
+#-------------------------------------------------------------
+
+# files <- list.files(here(wd, "", "functions"), full.names = TRUE)
+# lapply(files, source)
+
+#-------------------------------------------------------------------------
+# r4ss options
+#-------------------------------------------------------------------------
 
 skip_finished <- FALSE
 launch_html <- TRUE
+
+#-------------------------------------------------------------------------
+# To get and install ss3 executable files
+#-------------------------------------------------------------------------
 
 #' Wrapper for r4ss::get_ss3_exe to check for, download, and return name of SS3 exe file
 #' @param dir directory to install SS3 in
@@ -32,24 +59,25 @@ set_ss3_exe <- function(dir, ...) {
   
 }
 
+#-------------------------------------------------------------------------
 # Whether to re-run previously fitted models
+#-------------------------------------------------------------------------
+
 rerun <- FALSE
 
-# -------------------------------------------------------------
+#-------------------------------------------------------------------------
 # 2010 Const Growth Base Model
-# -------------------------------------------------------------
-
-## With new SS3 version ---------------------------------------
+#-------------------------------------------------------------------------
 
 ## Read in the base file
-finBasedir <- here("models","2025 base model")
+Base_2001dir <- here("models","OM.2001.constGrowth")
 
-ss3_exe <- set_ss3_exe(finBasedir, version = "v3.30.23")
+ss3_exe <- set_ss3_exe(Base_2001dir, version = "v3.30.23")
 
 # run model
 # With estimation and hessian it takes ~12 minutes
 r4ss::run(
-  dir = finBasedir,
+  dir = Base_2001dir,
   exe = ss3_exe,
   #extras = "-nohess",
   show_in_console = TRUE,
@@ -59,13 +87,13 @@ r4ss::run(
 
 # Get r4ss output
 replist <- SS_output(
-  dir = finBasedir,
+  dir = Base_2001dir,
   verbose = TRUE,
   printstats = TRUE,
   covar = TRUE
 )
 
 # Plots the results (store in the 'R_Plots' sub-directory)
-SS_plots(replist, dir = finBasedir, printfolder = "R_Plots")
+SS_plots(replist, dir = Base_2001dir, printfolder = "R_Plots")
 
-# -------------------------------------------------------------
+# -------------------------------------------------------------------------
