@@ -6,19 +6,19 @@
 data.ss
 control.ss
 0 # 0=use init values in control file; 1=use ss.par
-0 # run display detail (0,1,2)
+1 # run display detail (0,1,2)
 1 # detailed output (0=minimal for data-limited, 1=high (w/ wtatage.ss_new), 2=brief) 
 0 # write 1st iteration details to echoinput.sso file (0,1) 
 3 # write parm values to ParmTrace.sso (0=no,1=good,active; 2=good,all; 3=every_iter,all_parms; 4=every,active)
 2 # write to cumreport.sso (0=no,1=like&timeseries; 2=add survey fits)
 0 # Include prior_like for non-estimated parameters (0,1) 
 1 # Use Soft Boundaries to aid convergence (0,1) (recommended)
-2 # Number of datafiles to produce: 1st is input, 2nd is estimates, 3rd and higher are bootstrap
+1 # Number of datafiles to produce: 1st is input, 2nd is estimates, 3rd and higher are bootstrap
 10 # Turn off estimation for parameters entering after this phase
 10 # MCeval burn interval
 2 # MCeval thin interval
-0.0 # jitter initial parm value by this fraction
--1 # min yr for sdreport outputs (-1 for styr)
+0.00 # jitter initial parm value by this fraction
+1981 # min yr for sdreport outputs (-1 for styr)
 -2 # max yr for sdreport outputs (-1 for endyr; -2 for endyr+Nforecastyrs
 0 # N individual STD years 
 #vector of year values 
@@ -33,5 +33,5 @@ control.ss
 # 0 8 #_min and max age over which average F will be calculated
 2 # F_report_basis: 0=raw_F_report; 1=F/Fspr; 2=F/Fmsy ; 3=F/Fbtgt
 0 # MCMC output detail: integer part (0=default; 1=adds obj func components); and decimal part (added to SR_LN(R0) on first call to mcmc)
-0.0001 # ALK tolerance (example 0.0001)
+0 # ALK tolerance (example 0.0001) # must be 0 for SS versions prior to v3.30.22
 3.30 # check value for end of file and for version control

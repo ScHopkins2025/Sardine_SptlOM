@@ -7,7 +7,8 @@
 0.4 # SPR target (e.g. 0.40)
 0.4 # Biomass target (e.g. 0.40)
 #_Bmark_years: beg_bio, end_bio, beg_selex, end_selex, beg_relF, end_relF, beg_recr_dist, end_recr_dist, beg_SRparm, end_SRparm (enter actual year, or values of 0 or -integer to be rel. endyr)
- 2019 2019 2019 2019 2019 2019 2005 2019 2001 2019
+ 2023 2023 2015 2023 2005 2023 2005 2023 1981 2023 # copied from benchmark, but retained beg_recr_dist and beg_SRparm
+ #2019 2019 2019 2019 2019 2019 2005 2019 1981 2019
 1 #Bmark_relF_Basis: 1 = use year range; 2 = set relF same as forecast below
 #
 1 # Forecast: 0=none; 1=F(SPR); 2=F(MSY) 3=F(Btgt) or F0.1; 4=Ave F (uses first-last relF yrs); 5=input annual F scalar
@@ -25,7 +26,7 @@
 0 #_Forecast recruitment:  0= spawn_recr; 1=value*spawn_recr_fxn; 2=value*VirginRecr; 3=recent mean from yr range above (need to set phase to -1 in control to get constant recruitment in MCMC)
 1 # value is ignored 
 0 #_Forecast loop control #5 (reserved for future bells&whistles) 
-2021  #FirstYear for caps and allocations (should be after years with fixed inputs) 
+2024  #FirstYear for caps and allocations (should be after years with fixed inputs) 
 0 # stddev of log(realized catch/target catch) in forecast (set value>0.0 to cause active impl_error)
 0 # Do West Coast gfish rebuilder output (0/1) 
 0 # Rebuilder:  first year catch could have been set to zero (Ydecl)(-1 to set to 1999)
@@ -53,14 +54,21 @@
 99 # basis for input Fcast catch: -1=read basis with each obs; 2=dead catch; 3=retained catch; 99=input Hrate(F)
 #enter list of Fcast catches; terminate with line having year=-9999
 #_Yr Seas Fleet Catch(or_F)
-2020	1	1	0.01475
-2020	2	1	0.00
+2024	1	1	0.0136477 # Copied from benchmark
+2024	2	1	0.00
 
-2020	1	2	0.00
-2020	2	2	1.95
+2024	1	2	0.00
+2024	2	2	0.00
 
-2020	1	3	0.0015
-2020	2	3	0.00
+2024	1	3	0.00
+2024	2	3	0.00
+
+#2020	1	1	0.01475
+#2020	2	1	0.00
+#2020	1	2	0.00
+#2020	2	2	1.95
+#2020	1	3	0.0015
+#2020	2	3	0.00
 
 #2020	1	1	130.86
 #2020	2	1	0.00
