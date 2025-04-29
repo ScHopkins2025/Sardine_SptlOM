@@ -25,71 +25,53 @@ sapply(load.lib,require,character=TRUE)
 
 sf_use_s2(FALSE)
 
-dir <- "C:/Users/shopkin1/Documents/"
+dir <- "C:/Users/shopkin1/Documents"
 
 Figure.path <- "Figures/"
 
-```
-
-# Read data
-
-For each OM spatial extent load and join the data sets.
-
-## Load all wrangled CPS ATM Survey data
-
-For simplicity we load all length bin OM spatial extents simultaneously. Spatial extent figures and comps are handled later on.
-
-```{r, load.CPS.ATM}
-
+# Path to CPS ATM Survey Data
 path.CPS.ATM <- here(getwd(), 'ATM.Survey', 'Shapefiles')
 
-# Load all CPS.ATM files
-shp_files <- list.files(path.CPS.ATM,
-                        pattern = "\\.shp$",
-                        full.names = FALSE)
+```
 
-for (file in shp_files) {
+# Load all wrangled CalCOFI CUFES Survey data
+
+For simplicity we load all OM spatial extents simultaneously. 
+
+```{r, load.CUFES}
+
+path.CUFES <- here(getwd(), 'CUFES.Survey', 'Shapefiles')
+
+# Load all CUFES files
+shp_files2 <- list.files(path.CUFES, 
+                         pattern = "\\.shp$", 
+                         full.names = FALSE)
+
+for (file in shp_files2) {
   
-  # strip off the .shp
+  # 1. Strip off the .shp  
   base_name <- sub("\\.shp$", "", file)
-  
-  # replace hyphens with underscores
-  obj_name  <- gsub("-", "_", base_name)
-  
-  # 1st: hyphens → underscores
-  obj_name  <- gsub("-", "_", base_name)
-  
-  # 2nd: periods → underscores
-  #obj_name  <- gsub("\\.", "_", tmp_name)
-  
-  message("Reading ", file, " \u2192 object ‘", obj_name, "’")
-  
-  sf_obj <- read_sf(file.path(path.CPS.ATM, file))
+  # 2. Normalize name → underscores for hyphens  
+  obj_name <- gsub("[-\\]", "_", base_name)
+  # 3. Append source to name
+  obj_name <-paste(obj_name, "_CUFES",sep="")
+  message("Reading ", file, " -> object ‘", obj_name, "’")
+  # 4. Read the shapefile  
+  sf_obj <- read_sf(file.path(path.CUFES, file))
+  # 5. Add source_file column  
   sf_obj$source_file <- obj_name
-  
+  # 6. Assign into global environment  
   assign(obj_name, sf_obj, envir = .GlobalEnv)
-}
+
+  }
+
+rm(shp_files2, sf_obj)
 
 ```
 
-
-## Read the resulting OM shape files
-
-Note that there is a separate shape file for each length bin used. You should produce a LFD figure, and a Figure combine the CPUE computations and CUFES data. The CUFES data will be the same across all length bins, but changes between OM spatial extent.
-
-```{r, read.OM.1.data}
-
-
-```
-
-# Find min and max geographical extents
+# Set min and max geographical extents
 
 ```{r, Create.common.breaks}
-
-PreAbs <- fread(paste(dir,"CUFES.Survey/final.dat.csv", sep=""), sep = ";")
-
-common_lat_limits <- range(PreAbs$LAT)  # Ensure same latitude limits
-# [1] 28.65305 50.06535
 
 lat_breaks <- seq(27, 55, 4)  # Latitude breaks
 
@@ -102,7 +84,7 @@ lat_labels <- c(paste(27, "\u00b0", "N", sep=""),
                 paste(51, "\u00b0", "N", sep=""),
                 paste(55, "\u00b0", "N", sep=""))
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # Make coastline backdrop
 #-------------------------
 
@@ -110,7 +92,7 @@ PacificCoast <- ne_countries(scale = 10, returnclass = "sf")
 PacificCoast2 <- st_crop(PacificCoast, xmin = -130, xmax = -110, ymin = 25, ymax = 55)
 class(PacificCoast2)
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # Plot output
 #-------------------------
 
@@ -127,18 +109,18 @@ ggplot() +
 
 ```{r, adjust.map.dimensions}
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # Convert to sf object
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 PacificCoast3 <- PacificCoast2 %>%
   st_transform(., crs = 4326)
 
 plot(PacificCoast3)
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # Find spatial extents
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 xmin <- st_bbox(PacificCoast3)["xmin"]
 xmin
@@ -148,9 +130,9 @@ xmax <- st_bbox(PacificCoast3)["xmax"]
 xmax
 # [1] -110
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # Crop land mass
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 PacificCoast4 <- PacificCoast3 %>% 
   # Clip the shapefile to match the latitude range
@@ -160,9 +142,9 @@ PacificCoast4 <- PacificCoast3 %>%
           ymin = 27, 
           ymax = 55)
   
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # Plot
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 PacificCoast4.map <-
   ggplot() +
@@ -193,26 +175,27 @@ The second should look at the coast of California where the most mixing is thoug
 
 ```{r, find.original.model.break.dimensions}
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # In order to find the state boundary extents, use ne_states function in
 # rnaturalearth
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 # Find state boundaries
 PCoastStates <- ne_states(returnclass = "sf") %>%
   st_intersection(PacificCoast4) 
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # For EEZ definitions 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 # https://nauticalcharts.noaa.gov/data/us-maritime-limits-and-boundaries.html
 
-eez <- read_sf(paste(dir,"CUFES.Survey/EEZ/USMaritimeLimitsNBoundaries.shp", sep = ""))
+eez <- read_sf(paste(dir,"/CUFES.Survey/EEZ/USMaritimeLimitsNBoundaries.shp", 
+                     sep = ""))
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # Putting it all together
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 hlines <- eez %>%
   filter(REGION == "Pacific Coast") %>%
@@ -234,25 +217,28 @@ To make the map easier to interpret, add the names and locations of most populat
 
 ```{r, add.map.details}
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # populated areas (cities and city names)
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
-Populated10 <- ne_download(scale = 110, type = "populated_places_simple", category = "cultural", 
-                            returnclass = "sf") %>%
+Populated10 <- ne_download(scale = 110, type = "populated_places_simple", 
+                           category = "cultural", 
+                           returnclass = "sf") %>%
   st_intersection(PacificCoast4)
 
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # Plot definitions
-#--------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 ggplot() +
   geom_hline(data = hlines, aes(yintercept = nstock), col = "blue", 
              linewidth = 0.7, linetype = "dashed") +
   geom_hline(data = hlines, aes(yintercept = point.concept), col = "red", 
              linewidth = 0.7, linetype = "longdash") +
-  geom_hline(data = hlines, aes(yintercept = ymin), col = "black", linewidth = 0.7) +
-  geom_hline(data = hlines, aes(yintercept = ymax), col = "black", linewidth = 0.7) +
+  geom_hline(data = hlines, aes(yintercept = ymin), col = "black", 
+             linewidth = 0.7) +
+  geom_hline(data = hlines, aes(yintercept = ymax), col = "black", 
+             linewidth = 0.7) +
   geom_sf(data = PacificCoast4,
           color = "#ae8f60", 
           size = 0.7, 
@@ -276,671 +262,1094 @@ ggplot() +
   
 ```
 
-# Create boundary files
+# Produce figures
 
-Note that the min and max of the plot should have great spatial bound across all data sets and that this will likely change in the next iteration.
+For each OM spatial extent, make a LFD figure and a Figure combining the CPUE computations by length bin and CUFES data. The CUFES data will be the same across all length bins, but changes between OM spatial extent.
 
-```{r, define.OM.box.extents}
+## Create plot scales
 
-#--------------------------------------------------------------------------------
-# Find extent of CUFES
-#--------------------------------------------------------------------------------
+```{r, full.series.CPUE.range}
 
-PreAbs.sf <- PreAbs %>%
-  st_as_sf(.,coords = c("LON","LAT"), crs = 4326)
+path.CPS.ATM <- here(getwd(), 'ATM.Survey', 'Shapefiles')
 
-st_bbox(PreAbs.sf)
-#       xmin       ymin       xmax       ymax 
-# -134.11630   29.83315 -117.21575   54.74310 
+# Load all CPS.ATM files
+shp_files.OMs <- list.files(path.CPS.ATM,
+                            pattern = "\\.shp$", 
+                            full.names = FALSE)
 
-#--------------------------------------------------------------------------------
-# Load the other data values to determine spatial extent
-#--------------------------------------------------------------------------------
-ATM_survey <- fread(paste(dir,"ATM.Survey/final.dat.csv", sep=""), sep = ";")
 
-ATM_survey.sf <- ATM_survey %>%
-  st_as_sf(.,coords = c("LON","LAT"), crs = 4326)
+all.OMs <- lapply(paste0(path.CPS.ATM, "/", shp_files.OMs), read_sf)
 
-st_bbox(ATM_survey.sf)
-#       xmin       ymin       xmax       ymax 
-# -132.75425   28.65305 -114.82055   54.29885
+# Bind rows (keeps each feature separate, preserves attributes)
+combOMs.sf <- bind_rows(all.OMs)
 
-```
+pres.range <- combOMs.sf %>%
+  filter(len_bin != 0)
 
-# Create 5 spatial OMs files
+lim.min <- min(pres.range$CPUE)
+lim.max <- max(pres.range$CPUE)
 
-Note the the observation extent should first be used to define the outer min and max spatial boundaries. 
-
-```{r, define.OM.box.bounds}
-
-#-----------------------------------------------------------------------------
-# Define data boundaries
-#-----------------------------------------------------------------------------
-
-xmin = -134.11630
-ymin = 28.65305
-xmax = -114.82055
-ymax = 54.74310
-
-#-----------------------------------------------------------------------------
-# For Northern US EEZ to Inf
-#-----------------------------------------------------------------------------
-
-z1.bbox_coords <- c(xmin, unique(hlines$ymax), xmax, ymax)
-names(z1.bbox_coords) = c("xmin","ymin","xmax","ymax")
-
-z1bbp <- st_as_sfc(st_bbox(z1.bbox_coords)) 
-st_crs(z1bbp) = 4326
-
-#-----------------------------------------------------------------------------
-# For Northern stock to Northern US EEZ
-#-----------------------------------------------------------------------------
-
-z2.bbox_coords <- c(xmin, unique(hlines$nstock), xmax, unique(hlines$ymax))
-names(z2.bbox_coords) = c("xmin","ymin","xmax","ymax")
-
-z2bbp <- st_as_sfc(st_bbox(z2.bbox_coords)) 
-st_crs(z2bbp) = 4326
-
-#-----------------------------------------------------------------------------
-# For Southern stock to Northern stock
-#-----------------------------------------------------------------------------
-
-z3.bbox_coords <- c(xmin, unique(hlines$point.concept), xmax,
-                    unique(hlines$nstock))
-names(z3.bbox_coords) = c("xmin","ymin","xmax","ymax")
-
-z3bbp <- st_as_sfc(st_bbox(z3.bbox_coords))
-st_crs(z3bbp) = 4326
-
-#-----------------------------------------------------------------------------
-# For Southern US EEZ to Southern stock
-#-----------------------------------------------------------------------------
-
-z4.bbox_coords <- c(xmin, unique(hlines$ymin), xmax,
-                    unique(hlines$point.concept))
-names(z4.bbox_coords) = c("xmin","ymin","xmax","ymax")
-
-z4bbp <- st_as_sfc(st_bbox(z4.bbox_coords))
-st_crs(z4bbp) = 4326
-
-#-----------------------------------------------------------------------------
-# For Inf to Southern US EEZ
-#-----------------------------------------------------------------------------
-
-z5.bbox_coords <- c(xmin, ymin, xmax, unique(hlines$ymin))
-names(z5.bbox_coords) = c("xmin","ymin","xmax","ymax")
-
-z5bbp <- st_as_sfc(st_bbox(z5.bbox_coords))
-st_crs(z5bbp) = 4326
+range.absent <- combOMs.sf %>%
+  filter(len_bin == 0) 
 
 ```
 
-# Check OM spatial layout
+## Create custom colour pallet
 
-This will give us an idea if the previous definitions are appropriate.
-
-```{r, plot.OM.box.extents}
-
-ggplot() +
-  geom_sf(data = z1bbp, fill = "lightgrey", col = "black", alpha = 0.5) +
-  geom_sf(data = z2bbp, fill = "blue", col = "black", alpha = 0.5) +
-  geom_sf(data = z3bbp, fill = "lightgreen", col = "black", alpha = 0.5) +
-  geom_sf(data = z4bbp, fill = "green", col = "black", alpha = 0.5) +
-  geom_sf(data = z5bbp, fill = "steelblue", col = "black", alpha = 0.5) +
-  geom_sf(data = PacificCoast4,
-          color = "#ae8f60", 
-          size = 0.7, 
-          fill = "#E1C699") +
-  geom_sf(data = PCoastStates,
-          color = "#ae8f60", 
-          size = 0.7, 
-          fill = "#E1C699") +
-  geom_sf(data = Populated10, col = "black") +
-  geom_text(data = Populated10,
-            aes(x = longitude, y = latitude, label = name),
-            col = "black", 
-            position = position_dodge(width = 1),
-            vjust = 1) +
-  scale_y_continuous(limits = c(27,55), 
-                     breaks = lat_breaks, 
-                     labels = lat_labels, 
-                     expand = c(0.05, 0.05)) +
-  labs(y = "Latitude")
-
-```
-
-# Create map figures
-
-First plot the most recent series (note that the last three years seem to be missing).
-
-```{r, 2003-2024.setup}
+```{r, seasonal.colours}
 
 # Create custom colour pallet
-group.colors <- c(Summer = "#AA3929", Spring = "#3b4832", Winter = "lightgreen")
+season.colors <- c(Spring = "lightgreen", 
+                   Summer = "#3b4832", 
+                   Winter = "#D1E8F2")
 
-# Create vector of OM box extents
-bbox.lst <- c(z1bbp, z2bbp, z3bbp, z4bbp, z5bbp)
+pie(rep(1,15), col = season.colors)
 
-#-----------------------------------------------------------------------------
-# Convert absent values to sf object to preform geometric overlays
-#-----------------------------------------------------------------------------
+group.colors <- c("Spring - 100" = "#000000", 
+                  "Spring - 125" = "#004949",
+                  "Spring - 150" = "#009292",
+                  "Spring - 175" = "#ff6db6",
+                  "Spring - 200" = "#ffb6db",
+                  "Spring - 225" = "#490092",
+                  "Spring - 250" = "#006ddb",
+                  "Spring - 100" = "#b66dff",
+                  "Summer - 125" = "#6db6ff",
+                  "Summer - 150" = "#b6dbff",
+                  "Summer - 175" = "#920000",
+                  "Summer - 200" = "#924900",
+                  "Summer - 225" = "#db6d00",
+                  "Summer - 250" = "#ffff6d")
 
-sardine.values.post2003 <- PreAbs %>%
-  filter(Year > 2002 & CPUE !=0) %>%
-  mutate(Year = as.character(Year)) %>%
-  arrange(desc(CPUE)) 
-
-sardine.values.post2003.sf <- st_as_sf(sardine.values.post2003, 
-                                       coords = c("LON", "LAT"))
-st_crs(sardine.values.post2003.sf) = 4326
-
-#-----------------------------------------------------------------------------
-# Convert absent values to sf object to preform geometric overlays
-#-----------------------------------------------------------------------------
-
-Absent.values.post2003 <- PreAbs %>%
-  filter(Year > 2002 & CPUE == 0)
-
-Absent.values.post2003.sf <- st_as_sf(Absent.values.post2003, 
-                                      coords = c("LON", "LAT"))
-st_crs(Absent.values.post2003.sf) = 4326
-
-#-----------------------------------------------------------------------------
-# Standardize CPUE range
-#-----------------------------------------------------------------------------
-
-true.cpue <- PreAbs %>%
-  filter(CPUE !=0)
-
-lim.min <- min(true.cpue$CPUE)
-lim.max <- max(true.cpue$CPUE)
-
-#-----------------------------------------------------------------------------
-# Test subset
-#-----------------------------------------------------------------------------
-
-v <- bbox.lst[1]
-
-t <- sardine.values.post2003.sf[v,]
-
-ggplot() +
-  geom_sf(data= t)
+pie(rep(1,14), col = group.colors)
 
 ```
 
-# Repeat process
+## Read the resulting OM shape files - Area 1
 
-This are the same functions, but done over the whole time period
+Note that there is a separate shape file for each length bin used. You should 
 
-```{r, full.setup}
+```{r, read.OM.1.data}
 
-sardine.values <- PreAbs %>%
-  filter(CPUE !=0) %>%
-  mutate(Year = as.character(Year)) %>%
-  arrange(desc(CPUE)) 
+# List all CPS.ATM files
+shp_files.OM.1 <- list.files(path.CPS.ATM,
+                        pattern = "^OM\\.1.*\\.shp$",
+                        full.names = TRUE)
 
-sardine.values.sf <- st_as_sf(sardine.values, coords = c("LON", "LAT"))
-st_crs(sardine.values.sf) = 4326
+# Load listed CPS.ATM files
+all.OM.1 <- lapply(shp_files.OM.1, read_sf)
 
-Absent.values <- PreAbs %>%
-  filter(CPUE == 0)
+# Bind rows (keeps each feature separate, preserves attributes)
+combOM1.sf <- bind_rows(all.OM.1)
 
-Absent.values.sf <- st_as_sf(Absent.values, coords = c("LON", "LAT"))
-st_crs(Absent.values.sf) = 4326
+# subset absence data
+Absent.OM.1 <- combOM1.sf %>%
+  filter(len_bin == 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CPS ATM Survey file grouping length bin and season
+Present.OM.1 <- combOM1.sf %>%
+  filter(len_bin != 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CUFES Survey file grouping only season
+Present.OM.1_CUFES <- OM.1_CUFES %>%
+  filter(CPUE != 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+Absent.OM.1_CUFES <- OM.1_CUFES %>%
+  filter(CPUE == 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
 
 ```
 
-# Make final plots and tables
+## Create OM Spatial Area 1 Plot
 
-## Recreate the original figures
+```{r, integrated.plot}
 
-Because we have adjusted the spatial boundaries, it becomes necessary to redraw the map figures with CUFES data. Note that the last three years seem to be missing.
+# Create unified column for all types
+Present.OM.1$notation_type <- Present.OM.1$grp
+Present.OM.1_CUFES$notation_type <- as.character(Present.OM.1_CUFES$Season)
+#Absent.OM.1$notation_type <- "Absence of Sardine in Trawl"
+#Absent.OM.1_CUFES$notation_type <- "Absence of Sardine Eggs"
 
-```{r, redraw.original.figure.extents}
+# Combine palettes
+legend.levels <- c(names(group.colors),
+                   #"Absence of Sardine Eggs",
+                   #"Absence of Sardine in Trawl",
+                   names(season.colors))
 
-cpue.maps.is.made = T
+color.values <- c(group.colors,
+                  #"Absence of Sardine Eggs" = "darkgrey",
+                  #"Absence of Sardine in Trawl" = "darkgrey",
+                  season.colors)
 
-if (cpue.maps.is.made == F) {
+fill.values <- c(group.colors,
+                 #"Absence of Sardine Eggs" = "beige",
+                 #"Absence of Sardine in Trawl" = "grey",
+                 season.colors)
+
+shape.values <- c(
+  setNames(rep(21, length(group.colors)), names(group.colors)),
+  #"Absence of Sardine Eggs" = 23,
+  #"Absence of Sardine in Trawl" = 21,
+  setNames(rep(23, length(season.colors)), names(season.colors)))
+
+# Plot
+cpue.by.lat.OM.1 <-  
+  ggplot() +
   
-  ##--------------------------------------------------------------------------
-  # Create egg density plots for 2003 data to date 
-  # (this matches the CPS ATM Survey)
-  #---------------------------------------------------------------------------
+  # Add CalCOFI CUFES absence data
+  #geom_point(data = Absent.OM.1_CUFES,
+  #           aes(x = tim_stp, 
+  #               y = LAT, 
+  #               color = notation_type, 
+  #               fill = notation_type, 
+  #               shape = notation_type),
+  #           size = 1) +
   
-  for (s in unique(sardine.values.post2003$Season)){
-   
-     bin.subset <- sardine.values.post2003[sardine.values.post2003$Season == s,]
-     print(s)
-     
-     Absent.subset <- Absent.values.post2003[Absent.values.post2003$Season == s,]
-     
-     cpue.by.lat <- 
-       ggplot(data = distinct(bin.subset), 
-              aes(x = time.step, 
-                  y = LAT, 
-                  size=CPUE,
-                  fill=CPUE)) + 
-       geom_point(shape=21, alpha = 0.65, stroke=0.25) +
-       stat_summary(
-       fun = median,
-       geom = 'line',
-       linewidth = .75,
-       aes(group = Season, col = Season)) +
-       scale_size_continuous(range=c(2,12),
-                             limits = c(lim.min, lim.max), 
-                             breaks=breaks_extended(10)) +
-       scale_color_manual(values = group.colors) +
-       geom_hline(data = hlines, aes(yintercept = nstock), col = "blue", 
-                  linewidth = 0.7, linetype = "dashed") +
-       geom_hline(data = hlines, aes(yintercept = point.concept), col = "red", 
-                  linewidth = 0.7, linetype = "longdash") +
-       geom_hline(data = hlines, aes(yintercept = ymin), col = "black", 
-                  linewidth = 0.7) +
-       geom_hline(data = hlines, aes(yintercept = ymax), col = "black", 
-                  linewidth = 0.7) +
-       scale_y_continuous(limits = c(27,55), 
-                          breaks = lat_breaks,
-                          labels = lat_labels, 
-                          expand = c(0.05, 0.05)) +
-       geom_point(data = Absent.subset, aes(x = time.step,y = LAT), 
-                  col = "darkgrey",fill= "beige",shape=21, size = .025) +
-       geom_point(data = bin.subset, aes(x = time.step,y = LAT), 
-                  col = "black",fill= "black",shape=21, size = .025) +
-       scale_fill_distiller(direction = -1, 
-                            palette="RdYlBu", 
-                            limits = c(lim.min, lim.max),
-                            breaks=breaks_extended(10)) +
-       guides(fill = guide_legend(title = "ln(Nb/1m^3+1)", order = 2), 
-              size = guide_legend(title = "ln(Nb/1m^3+1)", order = 2)) +
-       # Add labels
-       labs(x = "Year", y = "Latitude", size = "Sardine Egg Density") +
+  # Add CPS ATM Survey absence data
+  #geom_point(data = Absent.OM.1,
+  #           aes(x = tim_stp, 
+  #               y = LAT, 
+  #               color = notation_type, 
+  #               fill = notation_type, 
+  #               shape = notation_type),
+  #           size = 1.5) +
+  
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.1,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Add CPS ATM Survey presence data points
+  geom_point(data = Present.OM.1,
+             aes(x = tim_stp, 
+                 y = LAT, 
+                 color = notation_type, 
+                 fill = notation_type, 
+                 shape = notation_type),
+             size = 1.5) +
+  
+  # Summarise CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.1_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add CalCOFI CUFES presence data points
+  geom_point(data = Present.OM.1_CUFES,
+             aes(x = tim_stp, 
+                 y = LAT, 
+                 color = notation_type, 
+                 fill = notation_type, 
+                 shape = notation_type),
+             size = 2) +
+  
+  scale_color_manual(name = "Notation Type", 
+                     values = color.values, 
+                     breaks = legend.levels) +
+  
+  scale_fill_manual(name = "Notation Type", 
+                    values = fill.values, 
+                    breaks = legend.levels) +
+  
+  scale_shape_manual(name = "Notation Type", 
+                     values = shape.values, 
+                     breaks = legend.levels) +
+  
+  labs(x = "Year", y = "Latitude") +
        theme_bw() +
        theme(axis.text.x = element_text(angle = 60, hjust=1))
-     
-     PacificCoast4.map <-
-       ggplot() +
-       geom_hline(data = hlines, aes(yintercept = nstock), col = "blue", 
-                  linewidth = 0.7, linetype = "dashed") +
-       geom_hline(data = hlines, aes(yintercept = point.concept), col = "red", 
-                  linewidth = 0.7, linetype = "longdash") +
-       geom_hline(data = hlines, aes(yintercept = ymin), col = "black", 
-                  linewidth = 0.7) +
-       geom_hline(data = hlines, aes(yintercept = ymax), col = "black", 
-                  linewidth = 0.7) +
-       scale_y_continuous(limits = c(27,55), 
-                          breaks = lat_breaks, 
-                          labels = lat_labels, 
-                          expand = c(0.05, 0.05)) +
-       geom_sf(data = PacificCoast4,
+
+cpue.by.lat.OM.1
+
+```
+
+## Read the resulting OM shape files - Area 2
+
+Note that there is a separate shape file for each length bin used. You should 
+
+```{r, read.OM.2.data}
+
+# List all CPS.ATM files
+shp_files.OM.2 <- list.files(path.CPS.ATM,
+                        pattern = "^OM\\.2.*\\.shp$",
+                        full.names = TRUE)
+
+# Load listed CPS.ATM files
+all.OM.2 <- lapply(shp_files.OM.2, read_sf)
+
+# Bind rows (keeps each feature separate, preserves attributes)
+combOM2.sf <- bind_rows(all.OM.2)
+
+# subset absence data
+Absent.OM.2 <- combOM2.sf %>%
+  filter(len_bin == 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CPS ATM Survey file grouping length bin and season
+Present.OM.2 <- combOM2.sf %>%
+  filter(len_bin != 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CUFES Survey file grouping only season
+Present.OM.2_CUFES <- OM.2_CUFES %>%
+  filter(CPUE != 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+Absent.OM.2_CUFES <- OM.2_CUFES %>%
+  filter(CPUE == 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+```
+
+## Create OM Spatial Area 2 Plot
+
+```{r, integrated.OM.2.plot}
+
+# Create unified column for all types
+Present.OM.2$notation_type <- Present.OM.2$grp
+Present.OM.2_CUFES$notation_type <- as.character(Present.OM.2_CUFES$Season)
+
+# Combine palettes
+legend.levels <- c(names(group.colors),
+                   names(season.colors))
+
+color.values <- c(group.colors,
+                  season.colors)
+
+fill.values <- c(group.colors,
+                 season.colors)
+
+shape.values <- c(
+  setNames(rep(21, length(group.colors)), names(group.colors)),
+  setNames(rep(23, length(season.colors)), names(season.colors)))
+
+# Plot
+cpue.by.lat.OM.2 <-  
+  ggplot() +
+  
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.2,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Summarize CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.2_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add summarised CalCOFI CUFES presence data points
+  stat_summary(data = Present.OM.2_CUFES,
+               fun = median,
+               geom = 'point',
+               size = 2,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type)) +
+  
+  scale_color_manual(name = "Notation Type", 
+                     values = color.values, 
+                     breaks = legend.levels) +
+  
+  scale_fill_manual(name = "Notation Type", 
+                    values = fill.values, 
+                    breaks = legend.levels) +
+  
+  scale_shape_manual(name = "Notation Type", 
+                     values = shape.values, 
+                     breaks = legend.levels) +
+  
+  labs(x = "Year", y = "Latitude") +
+       theme_bw() +
+       theme(axis.text.x = element_text(angle = 60, hjust=1))
+
+cpue.by.lat.OM.2
+
+```
+
+## Read the resulting OM shape files - Area 3
+
+Note that there is a separate shape file for each length bin used. You should 
+
+```{r, read.OM.3.data}
+
+# List all CPS.ATM files
+shp_files.OM.3 <- list.files(path.CPS.ATM,
+                        pattern = "^OM\\.3.*\\.shp$",
+                        full.names = TRUE)
+
+# Load listed CPS.ATM files
+all.OM.3 <- lapply(shp_files.OM.3, read_sf)
+
+# Bind rows (keeps each feature separate, preserves attributes)
+combOM3.sf <- bind_rows(all.OM.3)
+
+# subset absence data
+Absent.OM.3 <- combOM3.sf %>%
+  filter(len_bin == 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CPS ATM Survey file grouping length bin and season
+Present.OM.3 <- combOM3.sf %>%
+  filter(len_bin != 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CUFES Survey file grouping only season
+Present.OM.3_CUFES <- OM.3_CUFES %>%
+  filter(CPUE != 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+Absent.OM.3_CUFES <- OM.3_CUFES %>%
+  filter(CPUE == 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+```
+
+## Create OM Spatial Area 3 Plot
+
+```{r, integrated.OM.3.plot}
+
+# Create unified column for all types
+Present.OM.3$notation_type <- Present.OM.3$grp
+Present.OM.3_CUFES$notation_type <- as.character(Present.OM.3_CUFES$Season)
+
+# Combine palettes
+legend.levels <- c(names(group.colors),
+                   names(season.colors))
+
+color.values <- c(group.colors,
+                  season.colors)
+
+fill.values <- c(group.colors,
+                 season.colors)
+
+shape.values <- c(
+  setNames(rep(21, length(group.colors)), names(group.colors)),
+  setNames(rep(23, length(season.colors)), names(season.colors)))
+
+# Plot
+cpue.by.lat.OM.3 <-  
+  ggplot() +
+  
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.3,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Summarize CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.3_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add summarised CalCOFI CUFES presence data points
+  stat_summary(data = Present.OM.3_CUFES,
+               fun = median,
+               geom = 'point',
+               size = 2,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type)) +
+  
+  scale_color_manual(name = "Notation Type", 
+                     values = color.values, 
+                     breaks = legend.levels) +
+  
+  scale_fill_manual(name = "Notation Type", 
+                    values = fill.values, 
+                    breaks = legend.levels) +
+  
+  scale_shape_manual(name = "Notation Type", 
+                     values = shape.values, 
+                     breaks = legend.levels) +
+  
+  labs(x = "Year", y = "Latitude") +
+       theme_bw() +
+       theme(axis.text.x = element_text(angle = 60, hjust=1))
+
+cpue.by.lat.OM.3
+
+```
+
+## Read the resulting OM shape files - Area 4
+
+Note that there is a separate shape file for each length bin used. You should 
+
+```{r, read.OM.4.data}
+
+# List all CPS.ATM files
+shp_files.OM.4 <- list.files(path.CPS.ATM,
+                        pattern = "^OM\\.4.*\\.shp$",
+                        full.names = TRUE)
+
+# Load listed CPS.ATM files
+all.OM.4 <- lapply(shp_files.OM.4, read_sf)
+
+# Bind rows (keeps each feature separate, preserves attributes)
+combOM4.sf <- bind_rows(all.OM.4)
+
+# subset absence data
+Absent.OM.4 <- combOM4.sf %>%
+  filter(len_bin == 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CPS ATM Survey file grouping length bin and season
+Present.OM.4 <- combOM4.sf %>%
+  filter(len_bin != 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CUFES Survey file grouping only season
+Present.OM.4_CUFES <- OM.4_CUFES %>%
+  filter(CPUE != 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+Absent.OM.4_CUFES <- OM.4_CUFES %>%
+  filter(CPUE == 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+```
+
+## Create OM Spatial Area 4 Plot
+
+```{r, integrated.OM.4.plot}
+
+
+# Create unified column for all types
+Present.OM.4$notation_type <- Present.OM.4$grp
+Present.OM.4_CUFES$notation_type <- as.character(Present.OM.4_CUFES$Season)
+
+# Combine palettes
+legend.levels <- c(names(group.colors),
+                   names(season.colors))
+
+color.values <- c(group.colors,
+                  season.colors)
+
+fill.values <- c(group.colors,
+                 season.colors)
+
+shape.values <- c(
+  setNames(rep(21, length(group.colors)), names(group.colors)),
+  setNames(rep(23, length(season.colors)), names(season.colors)))
+
+# Plot
+cpue.by.lat.OM.4 <-  
+  ggplot() +
+  
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.4,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Summarize CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.4_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add summarised CalCOFI CUFES presence data points
+  stat_summary(data = Present.OM.4_CUFES,
+               fun = median,
+               geom = 'point',
+               size = 2,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type)) +
+  
+  scale_color_manual(name = "Notation Type", 
+                     values = color.values, 
+                     breaks = legend.levels) +
+  
+  scale_fill_manual(name = "Notation Type", 
+                    values = fill.values, 
+                    breaks = legend.levels) +
+  
+  scale_shape_manual(name = "Notation Type", 
+                     values = shape.values, 
+                     breaks = legend.levels) +
+  
+  labs(x = "Year", y = "Latitude") +
+       theme_bw() +
+       theme(axis.text.x = element_text(angle = 60, hjust=1))
+
+cpue.by.lat.OM.4
+
+```
+
+## Read the resulting OM shape files - Area 5
+
+Note that there is a separate shape file for each length bin used. You should 
+
+```{r, read.OM.5.data}
+
+# List all CPS.ATM files
+shp_files.OM.5 <- list.files(path.CPS.ATM,
+                        pattern = "^OM\\.5.*\\.shp$",
+                        full.names = TRUE)
+
+# Load listed CPS.ATM files
+all.OM.5 <- lapply(shp_files.OM.5, read_sf)
+
+# Bind rows (keeps each feature separate, preserves attributes)
+combOM5.sf <- bind_rows(all.OM.5)
+
+# subset absence data
+Absent.OM.5 <- combOM5.sf %>%
+  filter(len_bin == 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CPS ATM Survey file grouping length bin and season
+Present.OM.5 <- combOM5.sf %>%
+  filter(len_bin != 0) %>%
+  mutate(grp = factor(paste(Season, " - ", len_bin, sep = "")),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+# Create a new CUFES Survey file grouping only season
+Present.OM.5_CUFES <- OM.5_CUFES %>%
+  filter(CPUE != 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+Absent.OM.5_CUFES <- OM.5_CUFES %>%
+  filter(CPUE == 0) %>% 
+  mutate(grp = factor(Season),
+         LON = unlist(map(.$geometry,1)), 
+         LAT = unlist(map(.$geometry,2))) %>%
+      st_drop_geometry()
+
+```
+
+## Create OM Spatial Area 5 Plot
+
+```{r, integrated.OM.5.plot}
+
+# Create unified column for all types
+Present.OM.5$notation_type <- Present.OM.5$grp
+Present.OM.5_CUFES$notation_type <- as.character(Present.OM.5_CUFES$Season)
+#Absent.OM.5$notation_type <- "Absence of Sardine in Trawl"
+#Absent.OM.5_CUFES$notation_type <- "Absence of Sardine Eggs"
+
+# Combine palettes
+legend.levels <- c(names(group.colors),
+                   #"Absence of Sardine Eggs",
+                   #"Absence of Sardine in Trawl",
+                   names(season.colors))
+
+color.values <- c(group.colors,
+                  #"Absence of Sardine Eggs" = "darkgrey",
+                  #"Absence of Sardine in Trawl" = "darkgrey",
+                  season.colors)
+
+fill.values <- c(group.colors,
+                 #"Absence of Sardine Eggs" = "beige",
+                 #"Absence of Sardine in Trawl" = "grey",
+                 season.colors)
+
+shape.values <- c(
+  setNames(rep(21, length(group.colors)), names(group.colors)),
+  #"Absence of Sardine Eggs" = 23,
+  #"Absence of Sardine in Trawl" = 21,
+  setNames(rep(23, length(season.colors)), names(season.colors)))
+
+# Plot
+cpue.by.lat.OM.5 <-  
+  ggplot() +
+  
+  # Add CalCOFI CUFES absence data
+  #geom_point(data = Absent.OM.5_CUFES,
+  #           aes(x = tim_stp, 
+  #               y = LAT, 
+  #               color = notation_type, 
+  #               fill = notation_type, 
+  #               shape = notation_type),
+  #           size = 1) +
+  
+  # Add CPS ATM Survey absence data
+  #geom_point(data = Absent.OM.5,
+  #           aes(x = tim_stp, 
+  #               y = LAT, 
+  #               color = notation_type, 
+  #               fill = notation_type, 
+  #               shape = notation_type),
+  #           size = 1.5) +
+  
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.5,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Add CPS ATM Survey presence data points
+  geom_point(data = Present.OM.5,
+             aes(x = tim_stp, 
+                 y = LAT, 
+                 color = notation_type, 
+                 fill = notation_type, 
+                 shape = notation_type),
+             size = 1.5) +
+  
+  # Summarise CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.5_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add CalCOFI CUFES presence data points
+  geom_point(data = Present.OM.5_CUFES,
+             aes(x = tim_stp, 
+                 y = LAT, 
+                 color = notation_type, 
+                 fill = notation_type, 
+                 shape = notation_type),
+             size = 2) +
+  
+  scale_color_manual(name = "Notation Type", 
+                     values = color.values, 
+                     breaks = legend.levels) +
+  
+  scale_fill_manual(name = "Notation Type", 
+                    values = fill.values, 
+                    breaks = legend.levels) +
+  
+  scale_shape_manual(name = "Notation Type", 
+                     values = shape.values, 
+                     breaks = legend.levels) +
+  
+  labs(x = "Year", y = "Latitude") +
+       theme_bw() +
+       theme(axis.text.x = element_text(angle = 60, hjust=1))
+
+cpue.by.lat.OM.5
+
+```
+
+```{r, spatial.areas.combined}
+
+# Plot
+cpue.by.lat.OMs <-  
+  ggplot() +
+  
+  #------------------------------------------------------------------
+  # OM Spatial Area 1
+  #------------------------------------------------------------------
+  
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.1,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Add CPS ATM Survey presence data points
+  stat_summary(data = Present.OM.1,
+               fun = median,
+               geom = 'point',
+               size = 1.5,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type,
+                   shape = notation_type)) +
+  
+  # Summarize CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.1_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add summarized CalCOFI CUFES presence data points
+  stat_summary(data = Present.OM.1_CUFES,
+               fun = median,
+               geom = 'point',
+               size = 2,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type,
+                   shape = notation_type))
+  
+  #------------------------------------------------------------------
+  # OM Spatial Area 2
+  #------------------------------------------------------------------
+
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.2,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Add summarized CPS ATM Survey presence data points
+  stat_summary(data = Present.OM.2,
+               fun = median,
+               geom = 'point',
+               size = 1.5,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type,
+                   shape = notation_type)) +
+  
+  # Summarize CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.2_CUFES,
+               fun = median,
+               geom = 'line',
+               linetype = "dashed",
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type)) +
+  
+  # Add summarized CalCOFI CUFES presence data points
+  stat_summary(data = Present.OM.2_CUFES,
+               fun = median,
+               geom = 'point',
+               size = 2,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type,
+                   shape = notation_type)) +
+  
+  #------------------------------------------------------------------
+  # OM Spatial Area 3
+  #------------------------------------------------------------------
+  
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.3,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Add CPS ATM Survey presence data points 
+  stat_summary(data = Present.OM.3,
+               fun = median,
+               geom = 'point',
+               size = 1.5,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type,
+                   shape = notation_type)) +
+  
+  # Summarize CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.3_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add summarized CalCOFI CUFES presence data points
+  stat_summary(data = Present.OM.3_CUFES,
+               fun = median,
+               geom = 'point',
+               size = 2,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type,
+                   shape = notation_type)) +
+  
+  #------------------------------------------------------------------
+  # OM Spatial Area 4
+  #------------------------------------------------------------------
+
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.4,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Add CPS ATM Survey presence data points
+  stat_summary(data = Present.OM.4,
+               fun = median,
+               geom = 'point',
+               size = 1.5,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type,
+                   shape = notation_type)) +
+  
+  # Summarize CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.4_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add summarized CalCOFI CUFES presence data points
+  stat_summary(data = Present.OM.4_CUFES,
+               fun = median,
+               geom = 'point',
+               size = 2,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type,
+                   shape = notation_type)) + 
+  
+  #------------------------------------------------------------------
+  # OM Spatial Area 5
+  #------------------------------------------------------------------
+
+  # Summarize CPS ATM Survey presence data
+  stat_summary(data = Present.OM.5,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type)) +
+  
+  # Add CPS ATM Survey presence data points
+  stat_summary(data = Present.OM.5,
+               fun = median,
+               geom = 'point',
+               size = 1.5,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = grp, 
+                   color = notation_type,
+                   shape = notation_type)) +
+  
+  # Summarize CalCOFI CUFES presence data
+  stat_summary(data = Present.OM.5_CUFES,
+               fun = median,
+               geom = 'line',
+               linewidth = 0.75,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type),
+               linetype = "dashed") +
+  
+  # Add summarized CalCOFI CUFES presence data points
+  geom_point(data = Present.OM.5_CUFES,
+             fun = median,
+               geom = 'point',
+               size = 2,
+               aes(x = tim_stp, 
+                   y = LAT, 
+                   group = Season, 
+                   color = notation_type,
+                   shape = notation_type)) + 
+  
+  scale_color_manual(name = "Notation Type", 
+                     values = color.values, 
+                     breaks = legend.levels) +
+  
+  scale_fill_manual(name = "Notation Type", 
+                    values = fill.values, 
+                    breaks = legend.levels) +
+  
+  scale_shape_manual(name = "Notation Type", 
+                     values = shape.values, 
+                     breaks = legend.levels) + 
+  
+  geom_hline(data = hlines, aes(yintercept = nstock), col = "blue", 
+             linewidth = 0.7, linetype = "dashed") +
+  
+  geom_hline(data = hlines, aes(yintercept = point.concept), col = "red", 
+             linewidth = 0.7, linetype = "longdash") +
+  
+  geom_hline(data = hlines, aes(yintercept = ymin), col = "black", 
+             linewidth = 0.7) +
+  
+  geom_hline(data = hlines, aes(yintercept = ymax), col = "black", 
+             linewidth = 0.7) +
+  
+  scale_y_continuous(limits = c(27,55), 
+                     breaks = lat_breaks, 
+                     labels = lat_labels, 
+                     expand = c(0.05, 0.05)) +
+  
+  labs(x = "Year", y = "Latitude") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust=1))
+
+cpue.by.lat.OMs
+
+```
+
+
+```{r, integrated.plot}
+
+PacificCoast4.map <-
+  
+  ggplot() +
+  geom_hline(data = hlines, aes(yintercept = nstock), col = "blue", 
+             linewidth = 0.7, linetype = "dashed") +
+  geom_hline(data = hlines, aes(yintercept = point.concept), col = "red", 
+             linewidth = 0.7, linetype = "longdash") +
+  geom_hline(data = hlines, aes(yintercept = ymin), col = "black", 
+             linewidth = 0.7) +
+  geom_hline(data = hlines, aes(yintercept = ymax), col = "black", 
+             linewidth = 0.7) +
+  scale_y_continuous(limits = c(27,55), 
+                     breaks = lat_breaks, 
+                     labels = lat_labels, 
+                     expand = c(0.05, 0.05)) +
+  geom_sf(data = PacificCoast4,
+          color = "#ae8f60", 
+          size = 0.7, 
+          fill = "#E1C699") +
+  geom_sf(data = PCoastStates,
                color = "#ae8f60", 
                size = 0.7, 
                fill = "#E1C699") +
-       geom_sf(data = PCoastStates,
-               color = "#ae8f60", 
-               size = 0.7, 
-               fill = "#E1C699") +
-       geom_sf(data = Populated10, col = "black") +
-       geom_text(data = Populated10,
-                 aes(x = longitude, y = latitude, label = name),
-                 col = "black", 
-                 position = position_dodge(width = 1),
-                 vjust = 1) +
-       labs(y = "Latitude")
-     
-     returned.plot <-
-       # Combine the plots, ensuring they share the y-axis
-       cpue.by.lat + 
-       PacificCoast4.map + 
-       plot_layout(guides = "collect") & theme(legend.position = "right")
-     
-     file.name <- paste("2003ToDate.CUFES-",s, sep="")
-     
-     ggsave2(filename=paste(file.name,".jpeg",sep=''), plot=returned.plot,
-             device="jpeg", path=paste(dir,"CUFES.Survey/Figures",sep=""),
-             dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
-  }
-  
-  ##-----------------------------------------------------------------------------
-  # Create egg density plots over full time series
-  #------------------------------------------------------------------------------
-  
-  for (s in unique(sardine.values$Season)){
-    
-    bin.subset2 <- sardine.values[sardine.values$Season == s,]
-    print(s)
-     
-    Absent.subset2 <- Absent.values[Absent.values$Season == s,]
-     
-    cpue.by.lat2 <- 
-       ggplot(data = distinct(bin.subset2), 
-              aes(x = time.step, 
-                  y = LAT, 
-                  size=CPUE,
-                  fill=CPUE)) + 
-       geom_point(shape=21, alpha = 0.65, stroke=0.25) +
-       stat_summary(
-       fun = median,
-       geom = 'line',
-       linewidth = .75,
-       aes(group = Season, col = Season)) +
-       scale_size_continuous(range=c(2,12),
-                             limits = c(lim.min, lim.max), 
-                             breaks=breaks_extended(10)) +
-       scale_color_manual(values = group.colors) +
-       geom_hline(data = hlines, aes(yintercept = nstock), col = "blue", 
-                  linewidth = 0.7, linetype = "dashed") +
-       geom_hline(data = hlines, aes(yintercept = point.concept), col = "red", 
-                  linewidth = 0.7, linetype = "longdash") +
-       geom_hline(data = hlines, aes(yintercept = ymin), col = "black", 
-                  linewidth = 0.7) +
-       geom_hline(data = hlines, aes(yintercept = ymax), col = "black", 
-                  linewidth = 0.7) +
-       scale_y_continuous(limits = c(27,55), 
-                          breaks = lat_breaks,
-                          labels = lat_labels, 
-                          expand = c(0.05, 0.05)) +
-       geom_point(data = Absent.subset2, aes(x = time.step,y = LAT), 
-                  col = "darkgrey",fill= "beige",shape=21, size = .025) +
-       geom_point(data = bin.subset2, aes(x = time.step,y = LAT), 
-                  col = "black",fill= "black",shape=21, size = .025) +
-       scale_fill_distiller(direction = -1, 
-                            palette="RdYlBu", 
-                            limits = c(lim.min, lim.max),
-                            breaks=breaks_extended(10)) +
-       guides(fill = guide_legend(title = "ln(Nb/1m^3+1)", order = 2), 
-              size = guide_legend(title = "ln(Nb/1m^3+1)", order = 2)) +
-       # Add labels
-       labs(x = "Year", y = "Latitude", size = "Sardine Egg Density") +
-       theme_bw() +
-       theme(axis.text.x = element_text(angle = 60, hjust=1))
-    
-    returned.plot2 <-
-      # Combine the plots, ensuring they share the y-axis
-      cpue.by.lat2 + 
-      PacificCoast4.map + 
-      plot_layout(guides = "collect") & theme(legend.position = "right")
-     
-    file.name2 <- paste("FullSeries.CUFES-",s, sep="")
-     
-    ggsave2(filename=paste(file.name2,".jpeg",sep=''), plot=returned.plot2,
-            device="jpeg", path=paste(dir,"CUFES.Survey/Figures",sep=""),
-            dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
-  }
+  geom_sf(data = Populated10, col = "black") +
+  geom_text(data = Populated10,
+            aes(x = longitude, y = latitude, label = name),
+            col = "black", 
+            position = position_dodge(width = 1),
+            vjust = 1) +
+  labs(y = "Latitude")
 
-  ##---------------------------------------------------------------------------
-  # Create summary table over full data set
-  #----------------------------------------------------------------------------
+returned.plot <-
+  # Combine the plots, ensuring they share the y-axis
+  cpue.by.lat + 
+  PacificCoast4.map + 
+  plot_layout(guides = "collect") & theme(legend.position = "right")
   
-  ## Translate date to English
-  Sys.setlocale("LC_TIME", "English")
-  
-  # Summarize the latitudinal range, the corresponding months and days sampled
-  # per season, the number of number hauls, the number of individuals estimated
-  # per season, the range of lengths measured, the number of individuals 
-  # sampled within each haul
-  Hauls.N <- PreAbs %>% 
-    # Simplify the keys and extract the first element removing the first 10
-    # characters
-    mutate(LAT = round(as.numeric(LAT), 2)) %>%
-    group_by(time.step) %>% # Group Year and Season
-    arrange(MonthDay.num, .by_group = TRUE) %>%
-    mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay)),
-           Hauls = length(unique(keys)), 
-           Latitudes = paste(min(LAT), " - ",  
-                             max(LAT), sep ="")) %>%
-    ungroup() %>%
-    group_by(time.step, Year, Season, MonthDay, Hauls, Latitudes) %>%
-    summarise(CPUE.sardine = round(mean(CPUE.sardine),2), 
-              CPUE.anchovy = round(mean(CPUE.anchovy),2),
-              CPUE.jack_mackerel = round(mean(CPUE.jack_mackerel),2), 
-              CPUE.hake = round(mean(CPUE.hake),2),
-              CPUE.squid = round(mean(CPUE.squid),2),
-              CPUE.others = round(mean(CPUE.others),2),
-              Speed = round(mean(Speed),2)) %>%
-    ungroup() %>%
-    st_drop_geometry()
-  
-  # Create a survey index
-  Survey <-  seq_len(nrow(Hauls.N))
-  time.step = Hauls.N$time.step
-  
-  Survey.df <- data.frame(Survey, time.step)
-  
-  # Join everything together
-  CUFES.summary.table <- inner_join(Hauls.N, Survey.df)
-  
-  # sum the survey values where more than one month was sampled
-  dup.survey <- CUFES.summary.table
-  
-  # sum the survey values where more than one month was sampled
-  dup.survey <- distinct(dup.survey[,c("Survey", "Year", "Season", "MonthDay",
-                                       "Hauls", "CPUE.sardine", "CPUE.anchovy",
-                                       "CPUE.jack_mackerel", "CPUE.hake",
-                                       "CPUE.squid", "CPUE.others", "Speed",
-                                       "Latitudes")]) 
-  
-  ## Check which years where both spring and summer observations are present
-  dup.survey.test <- dup.survey %>% 
-    filter(duplicated(Survey)) %>% 
-    select(Year) %>%
-    distinct() %>%
-    t()
-  
-  dup.survey.test
-  
-  names(dup.survey) <- c("Survey", "Year", "Season", "MonthDay", "Hauls",
-                         "Mean Sardine Egg Density (Nb/m^3)", 
-                         "Mean Anchovy Egg Density (Nb/m^3)", 
-                         "Mean Jack mackerel Egg Density (Nb/m^3)",
-                         "Mean Hake Egg Density (Nb/m^3)",
-                         "Mean Squid Egg Density (Nb/m^3)",
-                         "Mean Egg Density for Other fish (Nb/m^3)", 
-                         "Mean Pump Speed", "Latitudes") 
-  
-  fwrite(dup.survey,
-         file = paste(dir,"CUFES.Survey/Summary.table.csv", sep=""), sep = ";")
-
-}
+returned.plot
 
 ```
-
-Here we are recycling the codes with updated definitions from the previous RMarkdown.
-
-```{r, 2003-2024.length.bin.cpue.plots}
-
-cpue.maps.is.made = F
-
-if (cpue.maps.is.made == F) {
-  
-  for (b in 1:length(bbox.lst)){
-    
-    #----------------------------------------------------------------------------
-    # For each OM spatial object
-    #----------------------------------------------------------------------------
-    
-    vals <- bbox.lst[b]
-    print(b)
-    
-    #----------------------------------------------------------------------------
-    # For that same OM spatial extent, subset the full time series and repeat 
-    # the process
-    #----------------------------------------------------------------------------
-      
-    bin.subset3 <- sardine.values.sf[vals,]
-    
-    Absent.subset3 <- Absent.values.sf[vals,] 
-    
-    shapes <- rbind(bin.subset3, Absent.subset3)
-    
-    write_sf(shapes, paste(dir,"CUFES.Survey/Shapefiles/OM.", b, ".shp", sep=""))
-    
-    bin.subset3 <- bin.subset3 %>%
-      mutate(LON = unlist(map(.$geometry,1)), 
-             LAT = unlist(map(.$geometry,2))) %>%
-      st_drop_geometry()
-    
-    Absent.subset3 <- Absent.subset3 %>%
-      mutate(LON = unlist(map(.$geometry,1)), 
-             LAT = unlist(map(.$geometry,2))) %>%
-      st_drop_geometry()
-    
-    cpue.by.lat3 <- 
-      ggplot(data = distinct(bin.subset3), 
-             aes(x = time.step, 
-                 y = LAT,
-                 size = CPUE,
-                 fill = CPUE)) + 
-      geom_point(shape=21, alpha = 0.65, stroke=0.25) +
-      stat_summary(
-        fun = median,
-        geom = 'line',
-        linewidth = .75,
-        aes(group = Season, col = Season)) +
-      scale_size_continuous(range=c(2,12),
-                            limits = c(lim.min, lim.max), 
-                            breaks=breaks_extended(10)) +
-      scale_color_manual(values = group.colors) +
-      geom_hline(data = hlines, aes(yintercept = nstock), col = "blue", 
-                 linewidth = 0.7, linetype = "dashed") +
-      geom_hline(data = hlines, aes(yintercept = point.concept), col = "red", 
-                 linewidth = 0.7, linetype = "longdash") +
-      geom_hline(data = hlines, aes(yintercept = ymin), col = "black", 
-                 linewidth = 0.7) +
-      geom_hline(data = hlines, aes(yintercept = ymax), col = "black", 
-                 linewidth = 0.7) +
-      scale_y_continuous(limits = c(27,55), 
-                         breaks = lat_breaks,
-                         labels = lat_labels, 
-                         expand = c(0.05, 0.05)) +
-      geom_point(data = Absent.subset3, aes(x = time.step,y = LAT), 
-                 col = "darkgrey",fill= "beige",shape=21, size = .025) +
-      geom_point(data = bin.subset3, aes(x = time.step,y = LAT), 
-                 col = "black",fill= "black",shape=21, size = .025) +
-      scale_fill_distiller(direction = -1, 
-                           palette="RdYlBu", 
-                           limits = c(lim.min, lim.max),
-                           breaks=breaks_extended(10)) +
-      guides(fill = guide_legend(title = "ln(Nb/1m^3+1)", order = 2), 
-             size = guide_legend(title = "ln(Nb/1m^3+1)", order = 2)) +
-      # Add labels
-      labs(x = "Year", y = "Latitude", size = "Sardine Egg Density") +
-      theme_bw() +
-      theme(axis.text.x = element_text(angle = 60, hjust=1))
-    
-    returned.plot3 <-
-      # Combine the plots, ensuring they share the y-axis
-      cpue.by.lat3 + 
-      PacificCoast4.map + 
-      plot_layout(guides = "collect") & theme(legend.position = "right")
-    
-    file.name3 <- paste("FullSeries.CUFES_", b, sep="") 
-    
-    ggsave2(filename=paste(file.name3,".jpeg",sep=''), plot=returned.plot3,
-            device="jpeg", path=paste(dir,"CUFES.Survey/Figures/OMs",sep=""),
-            dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
-
-    ##---------------------------------------------------------------------------
-    # Create summary table
-    #----------------------------------------------------------------------------
-      
-    PreAbs.subset <- rbind(Absent.subset3, bin.subset3)  
-    
-    # Summarize the latitudinal range, the corresponding months and days sampled
-    # per season, the number of number hauls, the number of individuals estimated
-    # per season, the range of lengths measured, the number of individuals 
-    # sampled within each haul
-    Hauls.N <- PreAbs.subset %>% 
-    # Simplify the keys and extract the first element removing the first 10
-    # characters
-      mutate(LAT = round(as.numeric(LAT), 2)) %>%
-      group_by(time.step) %>% # Group Year and Season
-      arrange(MonthDay.num, .by_group = TRUE) %>%
-      mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay)),
-             Hauls = length(unique(keys)), 
-             Latitudes = paste(min(LAT), " - ",  
-                               max(LAT), sep ="")) %>%
-     ungroup() %>%
-     group_by(time.step, Year, Season, MonthDay, Hauls, Latitudes) %>%
-     summarise(CPUE.sardine = round(mean(CPUE.sardine),2), 
-               CPUE.anchovy = round(mean(CPUE.anchovy),2),
-               CPUE.jack_mackerel = round(mean(CPUE.jack_mackerel),2), 
-               CPUE.hake = round(mean(CPUE.hake),2),
-               CPUE.squid = round(mean(CPUE.squid),2),
-               CPUE.others = round(mean(CPUE.others),2),
-               Speed = round(mean(Speed),2)) %>%
-      ungroup() %>%
-      st_drop_geometry()
-  
-    # Create a survey index
-    Survey <-  seq_len(nrow(Hauls.N))
-    time.step = Hauls.N$time.step
-  
-    Survey.df <- data.frame(Survey, time.step)
-  
-    # Join everything together
-    CUFES.summary.table <- inner_join(Hauls.N, Survey.df)
-  
-    # sum the survey values where more than one month was sampled
-    dup.survey <- CUFES.summary.table
-  
-    # sum the survey values where more than one month was sampled
-    dup.survey <- distinct(dup.survey[,c("Survey", "Year", "Season", "MonthDay",
-                                         "Hauls", "CPUE.sardine", "CPUE.anchovy",
-                                         "CPUE.jack_mackerel", "CPUE.hake",
-                                         "CPUE.squid", "CPUE.others", "Speed",
-                                         "Latitudes")]) 
-  
-    ## Check which years where both spring and summer observations are present
-    dup.survey.test <- dup.survey %>% 
-      filter(duplicated(Survey)) %>% 
-      select(Year) %>%
-      distinct() %>%
-      t()
-  
-    dup.survey.test
-  
-    names(dup.survey) <- c("Survey", "Year", "Season", "MonthDay", "Hauls",
-                           "Mean Sardine Egg Density (Nb/m^3)", 
-                           "Mean Anchovy Egg Density (Nb/m^3)", 
-                           "Mean Jack mackerel Egg Density (Nb/m^3)",
-                           "Mean Hake Egg Density (Nb/m^3)",
-                           "Mean Squid Egg Density (Nb/m^3)",
-                           "Mean Egg Density for Other fish (Nb/m^3)", 
-                           "Mean Pump Speed", "Latitudes") 
-    
-      fwrite(dup.survey,
-        file = paste(dir,"CUFES.Survey/Summary.table_OM_", b, ".csv", sep=""), 
-        sep = ";")
-      
-      #----------------------------------------------------------------------------
-      # Make the a simplified figure with just the trend over time
-      #----------------------------------------------------------------------------
-      
-      cpue <- 
-        ggplot(data = distinct(bin.subset3), 
-               aes(x = time.step, 
-                   y = CPUE)) + 
-        stat_summary(
-          fun = median,
-          geom = 'line',
-        linewidth = .75,
-        aes(group = Season, col = Season)) +
-        scale_color_manual(values = group.colors) +
-        geom_point(data = bin.subset3, aes(x = time.step, y = CPUE), 
-                         col = "black",fill= "black",shape=21, size = 1) +
-        labs(x = "Year", y = "CPUE in ln(Nb/1m^3+1)") + # Add labels
-        theme_bw() +
-        theme(axis.text.x = element_text(angle = 60, hjust=1))
-      
-      file.name4 <- paste("FullSeries.CUFES.trend_", b, sep="") 
-      
-      ggsave2(filename=paste(file.name4,".jpeg",sep=''), plot=cpue,
-              device="jpeg", path=paste(dir,"CUFES.Survey/Figures/OMs",sep=""),
-              dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
-
-  }
-}
-
-```
-
