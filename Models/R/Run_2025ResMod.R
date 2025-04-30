@@ -66,7 +66,7 @@ set_ss3_exe <- function(dir, ...) {
 rerun <- FALSE
 
 #-------------------------------------------------------------------------
-# 2010 Const Growth Base Model
+# 2025 Const Growth Base Model
 #-------------------------------------------------------------------------
 
 ## Read in the base file
@@ -96,4 +96,20 @@ replist <- SS_output(
 # Plots the results (store in the 'R_Plots' sub-directory)
 SS_plots(replist, dir = ResBaseMod2025dir, printfolder = "R_Plots")
 
+#-------------------------------------------------------------------------
+# Rerun values based on new files params
 # -------------------------------------------------------------------------
+
+# step 1: Create outputs by copying and modifying base model
+
+updateParms_dir <- here(wd, "models", "UpdateBaseModParms", "ChangeToInit_new")
+
+if (!dir.exists(updateParms_dir)) {
+  
+  dir.create(updateParms_dir, recursive = TRUE)
+  
+  r4ss::copy_SS_outputs(ResBaseMod2025dir, updateParms_dir)
+  
+}
+
+SS_readdat(here(wd, "models", "UpdateBaseModParms", "ChangeToInit_new", "data.ss"))

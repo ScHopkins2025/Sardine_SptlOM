@@ -2,8 +2,8 @@
     "sortOrder": [
         {
             "columnIndex": 2,
-            "ascending": false
+            "ascending": true
         }
     ],
-    "path": "~/Final.OM.spatial.structure/Models/R"
+    "path": "~/widow-assessment-update/R"
 }
