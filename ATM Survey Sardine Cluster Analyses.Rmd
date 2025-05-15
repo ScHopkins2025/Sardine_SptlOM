@@ -1,0 +1,2086 @@
+---
+title: "ATM Survey Sardine Maps"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_knit$set(root.dir = "C:/Users/shopkin1/Documents/")
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "grid", "ggspatial", "ggnewscale", "RColorBrewer", "scales", "rcompanion", "rnaturalearth", "rnaturalearthhires", "r4ss", "patchwork", "rmapshaper", "zoo", "suncalc")
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+sf_use_s2(FALSE)
+
+dir <- "C:/Users/shopkin1/Documents/"
+
+Figure.path <- "Figures/"
+
+#----------------------------------------------------------------------
+# Load stored CUFES OM data
+#----------------------------------------------------------------------
+
+CUFES <- fread(paste(dir,"CUFES.Survey/final.dat.csv", sep=""), sep=";")
+
+OM.1 <- read_sf(paste(dir, "CUFES.Survey/Shapefiles/OM.1.shp",sep=""))
+OM.2 <- read_sf(paste(dir, "CUFES.Survey/Shapefiles/OM.2.shp",sep=""))
+OM.3 <- read_sf(paste(dir, "CUFES.Survey/Shapefiles/OM.3.shp",sep=""))
+OM.4 <- read_sf(paste(dir, "CUFES.Survey/Shapefiles/OM.4.shp",sep=""))
+OM.5 <- read_sf(paste(dir, "CUFES.Survey/Shapefiles/OM.5.shp",sep=""))
+
+```
+
+# Read data
+
+Remember to convert length to cm to be able to use VBGF!
+
+```{r, read.data}
+
+full.series <- fread(paste(dir, "ATM.Survey/2003.2024.ATM.Survey.csv", sep = ""), 
+                     sep = ",") %>%
+  # convert mm to cm to be able to use VBGF
+  mutate(standard_length = standard_length/10) 
+
+```
+
+# Mean of the haul geometry
+
+Note that we are taking the mean of the starting point and ending point to denote the centroid.
+
+```{r, mean.haul.geom}
+
+#--------------------------------------------------------------------
+# For Shooting location
+# ----------------------------------------------
+
+range(full.series$start_latitude)
+# [1] 28.6513 54.3102
+Lat1 <- full.series$start_latitude
+
+mean(full.series$start_latitude)
+# [1] -122.6376
+
+range(full.series$start_longitude)
+# [1] -132.7302 -114.7928
+Lon1 <- full.series$start_longitude
+
+mean(full.series$start_longitude)
+# [1] -122.6376
+
+#--------------------------------------------------------------------
+# For hauling location
+# ----------------------------------------------
+
+range(full.series$stop_latitude)
+# [1] 28.6548 54.2875
+Lat2 <- full.series$stop_latitude
+
+range(full.series$stop_longitude)
+# [1] -132.7783 -114.8483
+Lon2 <- full.series$stop_longitude
+
+#--------------------------------------------------------------------
+# Find the mean of Shooting and Hauling location
+# ----------------------------------------------
+
+LAT <- data.table(Lat1, Lat2)
+LON <- data.table(Lon1, Lon2)
+
+full.series$LAT <- rowMeans(LAT)
+full.series$LON <- rowMeans(LON)
+ 
+plot(full.series$LON, full.series$LAT)
+
+```
+
+# Verify georefrence values
+
+This will tell us whether or not to clip the data when we make plots.
+
+```{r lat.lon.extent}
+
+range(full.series$LAT)
+# [1] 28.65305 54.29885
+
+range(full.series$LON)
+# [1] -132.7543 -114.8205
+
+```
+
+# Create polygon layers 
+
+```{r}
+
+# Step 1) Create a linestring for each transect
+line_geoms <- mapply(function(lon1, lat1, lon2, lat2) {
+  st_linestring(matrix(c(lon1, lat1, lon2, lat2), ncol = 2, byrow = TRUE))
+},
+full.series$start_longitude, full.series$start_latitude,
+full.series$stop_longitude, full.series$stop_latitude,
+SIMPLIFY = FALSE)
+
+# Turn into sf object
+trip_rect <- st_sf(full.series, geometry = st_sfc(line_geoms, crs = 4326))
+  
+```
+
+# Determine fishing duration
+
+```{r, calculate.fishing.duration}
+
+full.series.sf <- trip_rect %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry) %>%
+  mutate(haulback_time = strptime(haulback_time, "%Y-%m-%d %H:%M:%S"),
+         equilibrium_time = strptime(equilibrium_time, "%Y-%m-%d %H:%M:%S")) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry) %>%
+  mutate(haulback_t = as.numeric(format(haulback_time, "%H")) + 
+           as.numeric(format(haulback_time, "%M"))/60,
+         equilibrium_t = as.numeric(format(equilibrium_time, "%H")) + 
+           as.numeric(format(equilibrium_time, "%M"))/60) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry) %>%
+  mutate(duration = (haulback_t - equilibrium_t)) %>%
+  ungroup()
+
+head(unique(full.series.sf$haulback_time))
+head(unique(full.series.sf$haulback_t))
+head(unique(full.series.sf$equilibrium_time))
+head(unique(full.series.sf$equilibrium_t))
+head(unique(full.series.sf$duration))
+  
+```
+
+# Calculate the total catch weight for each length
+
+Note that here we are standardizing and correcting the data to remove noise and better match the outputs in the commercial data sets.
+
+```{r, convert.to.age}
+
+# Note that the sum of weight (individual weight obs) should equal the subsample_weight 
+# (checked in data prep code)
+Sardine <- full.series.sf %>% 
+  filter(scientific_name == "Sardinops sagax") %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, 
+           duration, LAT, LON) %>%
+  # Sum over the number of sampled weights and find the total weight of the catch 
+  mutate(Total_N = sum(subsample_count), 
+         Total_W = sum(subsample_weight+remaining_weight)) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, standard_length,
+           Total_N, Total_W, duration, LAT, LON) %>% 
+  # Remove entries where there are no length observations and sum sampled number and
+  # weight
+  filter(!is.na(standard_length)) %>%
+  summarise(NBRE_IN = sum(subsample_count), 
+            WGHT_IN = sum(as.numeric(weight)),
+            .groups = "keep") %>%
+  ungroup() %>% 
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, 
+           duration, LAT, LON) %>% 
+  # Determine portion of lengths represented in the catch and find the mean weight at
+  # length
+  mutate(PropLen = NBRE_IN/Total_N, 
+         TheoreticalWgt_i = (7.52e-06*((standard_length)^3.23))) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, 
+           duration, LAT, LON) %>%
+  # Take the proportion of the mean weight at length in the catch 
+  mutate(EstimatedWeight = sum(PropLen*TheoreticalWgt_i)*Total_N) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, Total_N,
+           duration, LAT, LON) %>%
+  #  Adjust the total weight (sampled + unsampled weight) based on the proportion of
+  # mean weight at length
+  mutate(Correction.factor = sum(Total_W)/EstimatedWeight) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, Total_N,
+           duration, LAT, LON) %>%
+  # Multiple the proportion of lengths represented in the catch by the adjusted
+  # proportion of weight represented by length
+  mutate(CatchWeightLen = Total_N*PropLen*TheoreticalWgt_i*Correction.factor) %>%
+  ungroup()
+
+# View(Sardine)
+
+range(Sardine$Total_W)
+# [1] 0.0005 364013.8000
+
+# View(Sardine)
+
+```
+
+```{r, check.length.distributions}
+
+dim(Sardine)
+# [1] 10032    19
+
+dim(distinct(Sardine))
+# [1] 10032    19
+
+summary(distinct(Sardine))
+
+sum(Sardine$NBRE_IN)
+# [1] 775645
+
+Sardine$equilibrium_time <- as.factor(Sardine$equilibrium_time)
+
+plotNormalHistogram(Sardine$standard_length)
+
+ggplot(data = na.omit(Sardine), aes(x=standard_length, y=PropLen, 
+                                    col=equilibrium_time)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme(legend.position="none") 
+
+range(Sardine$standard_length)
+# [1] 2.5 29.2
+
+```
+
+There are many different values used to assess length at age in the region and there are high levels of variability between individuals, years, seasons, and cohorts. For example K was historically nearly double that of the most recent publication (Wildermuth et al., 2024), where previous values were L(inf) = 31 cm, and K = 0.460 (Female) off the coast of California >> Phillips, J.B., 1948. Growth of the sardine *Sardinops caerulea* 1941-42 through 1945-47. Calif. Dept. Fish and Game. Calif. Fish. Bull. 71:33 p. Below, we investigate the potential of using the Wildermuth et al., 2024 values for L(inf), K, and t0 in the extended data set with all lengths considered.
+
+```{r, extract.ss.growth.params}
+
+# Where ss output files are
+model_dir <- "C:/Users/shopkin1/Documents/Original.SardineMSE/scenarioModels"
+
+# Read ssouput file
+OM_age.length <- SSgetoutput(dir = file.path(model_dir, "start2001/constGrowthMidSteepNewSelex_OM/"))
+
+# Check structure
+str(OM_age.length)
+
+# How many age classes were fed into the model (model forecasts the rest)
+OM_age.length$replist1$agebins
+# [1] 0 1 2 3 4 5 6 7 8
+
+#-----------------------------------------------------------------------------------
+# Below are the values needed for VBGF
+#-------------------------
+
+# Estimated age
+Linf <- OM_age.length$replist1$Growth_Parameters$Linf
+Linf
+# [1] 25.153
+
+K <- OM_age.length$replist1$Growth_Parameters$K
+K
+# [1] 0.273111
+
+# A1 is the starting length (true age 0 values)
+A1 <- OM_age.length$replist1$Growth_Parameters$A1
+A1 
+# [1] 0.5
+
+# A2 is either fixed at a theoretical maximum or inf (999)
+A2 <- OM_age.length$replist1$Growth_Parameters$A2
+A2 
+# [1] 999
+
+# Smallest observed length in the data set
+L_a_A1 <- OM_age.length$replist1$Growth_Parameters$L_a_A1
+L_a_A1
+# [1] 13.1744
+
+# You can also index them all at once
+OM_age.length$replist1$Growth_Parameters
+
+#-----------------------------------------------------------------------------------
+# To find t0, which is estimated in the ss model rather than explicit
+#-------------------------
+
+# Equation used
+t0 <- A1 + (log(1-L_a_A1/Linf))/K
+t0
+# [1] -2.216315
+
+# Undefined parameter in the model handbook thought to be t0
+A_a_L0 <- OM_age.length$replist1$Growth_Parameters$A_a_L0
+A_a_L0
+# [1] -2.2163
+
+# Things to look up later for types of errors (!= fleets, != # of params)
+OM_age.length$replist1$age_error_mean
+OM_age.length$replist1$age_error_sd
+
+# Returns the Maximum Likelihood Estimates (MLE)
+OM_age.length$replist1$growthseries[1,5:15]
+
+# Create a vector of mle values
+mle.vals <- c(t(OM_age.length$replist1$growthseries[1,5:15]))
+
+# Create a vector of ages
+age.vals <- seq(0,10,1)
+
+# Combine in a data frame ages and mle values
+ss.age.len <- data.frame(mle.vals, age.vals)
+
+# To view parameterizations and associated sd values
+OM_age.length$replist1$parameters 
+
+```
+
+# Estimate age
+
+Use the values extracted from the ss model for pacific sardine
+
+```{r, apply.inverse.vbgg}
+
+# Apply VBGF
+Sardine2 <- Sardine %>%
+  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, duration) %>%
+  mutate(age = round((-1/K)*log(1-(standard_length/Linf)) + A_a_L0)) %>% 
+  ungroup() %>%
+  group_by(age) %>%
+  mutate(mean.length.age = mean(standard_length)) %>%
+  ungroup() %>%  
+  distinct()
+
+# Explore NaN values
+sardine2.nans.pt1 <- Sardine2 %>%
+  filter(is.na(age))
+
+# How many observations are lost
+dim(sardine2.nans.pt1)
+# [1] 760  21
+
+# What lengths are not represented
+sardine2.nans.pt2 <- sardine2.nans.pt1 %>%
+  distinct(standard_length)
+
+# Vector of lengths not represented
+c(t(sardine2.nans.pt2))
+#  [1] 25.2 25.8 27.1 25.3 26.7 25.5 25.6 26.2 25.4 25.7 26.0 25.9 26.8 28.9 26.1 26.4 26.3
+# [18] 28.4 27.2 27.3 27.4 28.1 26.5 26.9 27.8 26.6 27.5 27.0 27.6 28.0 29.2 27.9 28.2 27.7
+# [35] 29.1
+
+# Plot age length per haul, average age per haul, and ss mle values 
+# (when excluding larger lengths from the data)...not a sensitivity analysis is still needed
+ggplot() + 
+  geom_point(data=na.omit(Sardine2), aes(x=age, y=standard_length)) +
+  geom_line(data=na.omit(Sardine2), aes(x=age, y=mean.length.age), col = "red") +
+  geom_line(data=ss.age.len, aes(x=age.vals, y=mle.vals), col = "blue") + 
+  scale_y_continuous(breaks = seq(0, 31, by = 2)) +
+  scale_x_continuous(breaks = seq(0, 20, by = 1)) +
+  ylab("Standard Length (cm)") +
+  xlab("Estimate Age (yr)") +
+  theme_classic()
+
+```
+
+# Define length bin definitions for Sardine only
+
+Because aging is uncertain, propose length bins where the first 100mm are grouped (considered age 0), and where every 2.25 cm is added.
+
+```{r, length.bin.defs}
+
+len.bins <- Sardine2 %>%
+  filter(collection != 2734) 
+
+head(len.bins)
+
+range(len.bins$standard_length)
+# [1]  2.5 29.2
+
+#-------------------------------------------------------------------------------
+# Check lowest intervals
+#-------------------------------------------------------------------------------
+
+len100 <- len.bins %>%
+  filter(standard_length <= 10) %>%
+  mutate(len.bin = "100")
+
+sort(unique(len100$age))
+# [1] -2 -1 0
+
+#-------------------------------------------------------------------------------
+# Shift bin 2.5 cm
+#-------------------------------------------------------------------------------
+
+len125 <- len.bins %>%
+  filter(standard_length > 10 & standard_length < 12.6) %>%
+  mutate(len.bin = "125")
+
+sort(unique(len125$age))
+# [1] 0
+
+#-------------------------------------------------------------------------------
+# Shift bin 2.5 cm
+#-------------------------------------------------------------------------------
+
+len150 <- len.bins %>%
+  filter(standard_length > 12.5 & standard_length < 15.1) %>%
+  mutate(len.bin = "150")
+
+sort(unique(len150$age))
+# [1] 0 1
+
+#-------------------------------------------------------------------------------
+# Shift bin 2.5 cm
+#-------------------------------------------------------------------------------
+
+len175 <- len.bins %>%
+  filter(standard_length > 15 & standard_length < 17.6) %>%
+  mutate(len.bin = "175")
+
+sort(unique(len175$age))
+# [1] 1 2
+
+#-------------------------------------------------------------------------------
+# Shift bin 2.5 cm
+#-------------------------------------------------------------------------------
+
+len200 <- len.bins %>%
+  filter(standard_length > 17.5 & standard_length < 20.1) %>%
+  mutate(len.bin = "200")
+
+sort(unique(len200$age))
+# [1] 2 3 4
+
+#-------------------------------------------------------------------------------
+# Shift bin 2.5 cm
+#-------------------------------------------------------------------------------
+
+len225 <- len.bins %>%
+  filter(standard_length > 20 & standard_length < 22.6) %>%
+  mutate(len.bin = "225")
+
+sort(unique(len225$age))
+# [1] 4 5 6
+
+#-------------------------------------------------------------------------------
+# Shift bin 2.5 cm
+#-------------------------------------------------------------------------------
+
+len250 <- len.bins %>%
+  filter(standard_length > 22.5 & standard_length < 25.1) %>%
+  mutate(len.bin = "250")
+
+sort(unique(len250$age))
+# [1] 6 7 8 9 10 11 12 13 15 16
+
+#-------------------------------------------------------------------------------
+# Shift bin 2.5 cm and group values
+#-------------------------------------------------------------------------------
+
+len250plus <- len.bins %>%
+  filter(standard_length > 25.5) %>%
+  mutate(len.bin = "250+")
+
+#-------------------------------------------------------------------------------
+# Re-code negative age to 0
+#-------------------------------------------------------------------------------
+
+len100.negs <- len100 %>%
+  filter(age < 0) %>%
+  mutate(age = 0)
+
+len100.0s <- len100 %>%
+  filter(age == 0)
+
+len100.new <- rbind(len100.negs,  len100.0s)
+
+
+#-------------------------------------------------------------------------------
+# Join data sets 
+#-------------------------------------------------------------------------------
+
+len.bins2 <- rbind(len100.new, len125, len150, len175, len200, len225, len250)
+
+#-------------------------------------------------------------------------------
+# Re-code Sardines NaNs and to 13+ ages to 10+
+#-------------------------------------------------------------------------------
+
+len.bins2.ok <- len.bins2 %>%
+  filter(!is.na(age) & age < 10)
+
+len.bins2.no <- len.bins2 %>%
+  filter(age > 9) %>%
+  mutate(age = 10)
+
+len250plus <- len250plus %>%
+  filter(is.na(age)) %>%
+  mutate(age = 10)
+
+len.bins2 <- rbind(len.bins2.ok, len.bins2.no, len250plus)
+
+```
+
+# Calculate CPUE by length bin for Sardine only
+
+This is the same procedure as above, only in place of age we now have length bins.
+
+```{r, length.bin.cpues}
+
+len.bins3 <- len.bins2 %>%
+  mutate(equilibrium_time = as.POSIXct(equilibrium_time, 
+                                       format = "%Y-%m-%d %H:%M:%S")) %>%
+  group_by(cruise, ship, haul, equilibrium_time, len.bin, duration, geometry) %>%
+  mutate(Catch.wt = sum(CatchWeightLen)) %>%
+  mutate(CPUE.trp = log1p(Catch.wt / as.numeric(duration))) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, len.bin, geometry) %>%
+  mutate(Year = as.numeric(substr(equilibrium_time,1,4)),
+         Month = as.numeric(substr(equilibrium_time,6,7))) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, len.bin, geometry) %>%
+  mutate(Season =
+           case_when(Month %in% c(3:5) ~"Spring",  
+                     Month %in% c(6:11) ~"Summer")) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, len.bin, geometry) %>%
+  mutate(time.step = paste(Year," - ", Season, sep="")) %>%
+  ungroup() %>%
+  select(collection, age, len.bin, Catch.wt, CPUE.trp, Year, Month, Season, time.step,
+         geometry, equilibrium_time, standard_length, NBRE_IN, Total_N, LON, LAT,
+         CatchWeightLen) %>%
+  mutate(keys = paste(collection, Year, Month, Season, geometry, time.step,
+                      equilibrium_time, sep="")) %>%
+  distinct()
+
+# Find min and max values for plots
+lim.max <- max(len.bins3$CPUE.trp)
+lim.min <- min(len.bins3$CPUE.trp)
+
+# View(len.bins3)
+
+```
+
+#  Calculate CPUE by length bin for Other species
+
+```{r}
+
+Others <- full.series.sf %>% 
+  filter(scientific_name != "Sardinops sagax") %>%
+  mutate(scientific_name = "Other")  %>%
+  group_by(cruise, ship, haul, equilibrium_time, duration, geometry) %>%
+  mutate(Catch.wt = 0, 
+         CPUE.trp = 0, 
+         len.bin = 0, 
+         standard_length = NA, 
+         NBRE_IN = 0, 
+         Total_N = 0, 
+         CatchWeightLen = 0,
+         age = NA) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, geometry) %>%
+  mutate(Year = as.numeric(substr(equilibrium_time,1,4)),
+         Month = as.numeric(substr(equilibrium_time,6,7))) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, geometry) %>%
+  mutate(Season =
+           case_when(Month %in% c(3:5) ~"Spring",  
+                     Month %in% c(6:11) ~"Summer")) %>%
+  ungroup() %>%
+  group_by(cruise, ship, haul, equilibrium_time, geometry) %>%
+  mutate(time.step = paste(Year," - ", Season, sep="")) %>%
+  ungroup() %>%
+  st_transform(.,crs = 4326) %>%
+  select(collection, age, len.bin, Catch.wt, CPUE.trp, Year, Month, Season, time.step,
+         geometry, equilibrium_time, standard_length, NBRE_IN, Total_N, LON, LAT,
+         CatchWeightLen) %>%
+  mutate(keys = paste(collection, Year, Month, Season, geometry, time.step,
+                      equilibrium_time, sep="")) %>%
+  distinct()
+
+```
+
+# Sum tables and simplify
+
+```{r}
+
+# Check that no weird stuff is happening (there shouldn't be)
+!colnames(len.bins3) %in% colnames(Others)
+!colnames(Others) %in% colnames(len.bins3)
+
+Absent <- Others %>%
+  filter(!keys %in% len.bins3$keys)
+
+# View(Absent)
+
+PreAbs <- rbind(len.bins3, Absent)
+
+# View(PreAbs)
+
+# Check colelction ids for changes
+
+Sardine.test <- PreAbs %>% 
+  filter(CPUE.trp == 0)
+
+change <- len.bins3 %>%
+  filter(collection %in% Sardine.test$collection)
+
+fwrite(PreAbs, paste(dir,"ATM.Survey/final.dat.csv", sep=""), sep = ";")
+
+# plot locations
+ggplot() +
+  geom_sf(data = PreAbs, col = "black")
+
+```
+
+# Find min and max geographical extents
+
+```{r, Create.common.breaks}
+
+common_lat_limits <- range(PreAbs$LAT)  # Ensure same latitude limits
+# [1] 28.65305 54.29885
+
+lat_breaks <- seq(27, 55, 4)  # Latitude breaks
+
+lat_labels <- c(paste(27, "\u00b0", "N", sep=""),
+                paste(31, "\u00b0", "N", sep=""),
+                paste(35, "\u00b0", "N", sep=""),
+                paste(39, "\u00b0", "N", sep=""),
+                paste(43, "\u00b0", "N", sep=""),
+                paste(47, "\u00b0", "N", sep=""),
+                paste(51, "\u00b0", "N", sep=""),
+                paste(55, "\u00b0", "N", sep=""))
+
+```
+
+# Create base map
+
+```{r, basemap}
+
+#---------------------------------------------------------------------------------
+# Make coastline backdrop
+#-------------------------
+
+PacificCoast <- ne_countries(scale = 10, returnclass = "sf") 
+PacificCoast2 <- st_crop(PacificCoast, xmin = -130, xmax = -110, ymin = 25, ymax = 55)
+class(PacificCoast2)
+
+#---------------------------------------------------------------------------------
+# Plot output
+#-------------------------
+
+ggplot() +
+    geom_sf(data = PacificCoast2, fill = "#D2B48C", col = "#927143") +
+    xlab("Longitude") + ylab("Latitude") +
+    ggtitle("West Coast map") +
+    theme_classic()
+
+```
+
+## Apply min and max geographical extents
+
+```{r, adjust.map.dimensions}
+
+#---------------------------------------------------------------------------------
+# Convert to sf object
+#---------------------------------------------------------------------------------
+
+PacificCoast3 <- PacificCoast2 %>%
+  st_transform(., crs = 4326)
+
+plot(PacificCoast3)
+
+#---------------------------------------------------------------------------------
+# Find spatial extents
+#---------------------------------------------------------------------------------
+
+xmin <- st_bbox(PacificCoast3)["xmin"]
+xmin
+# [1] -130
+
+xmax <- st_bbox(PacificCoast3)["xmax"]
+xmax
+# [1] -110
+
+#---------------------------------------------------------------------------------
+# Crop land mass
+#---------------------------------------------------------------------------------
+
+PacificCoast4 <- PacificCoast3 %>% 
+  # Clip the shapefile to match the latitude range
+  st_crop(PacificCoast3, 
+          xmin = -127, 
+          xmax = -111,
+          ymin = 27, 
+          ymax = 55)
+  
+#---------------------------------------------------------------------------------
+# Plot
+#---------------------------------------------------------------------------------
+
+PacificCoast4.map <-
+  ggplot() +
+  geom_sf(data = PacificCoast4,
+          color = "#ae8f60", 
+          size = 0.7, 
+          fill = "#E1C699") +
+  theme_void() +
+  scale_y_continuous(limits = c(27,55), 
+                     breaks = lat_breaks, 
+                     labels = lat_labels, 
+                     expand = c(0.05, 0.05)) +
+  labs(y = "Latitude")
+
+PacificCoast4.map
+
+st_bbox(PacificCoast4)
+#     xmin ymin xmax ymax
+# [1] -127   27 -111   55
+
+```
+
+# Creat hline boundaries
+
+Because the current model looks at only the Northern sub population in US waters, one of the boundary extents should include the national boarders.
+
+The second should look at the coast of California where the most mixing is thought to occur for Pacific Sardine sub populations (under the current survey hypothesis)
+
+```{r, find.original.model.break.dimensions}
+
+#---------------------------------------------------------------------------------
+# In order to find the state boundary extents, use ne_states function in rnaturalearth
+#---------------------------------------------------------------------------------
+
+# Find state boundaries
+PCoastStates <- ne_states(returnclass = "sf") %>%
+  st_intersection(PacificCoast4) 
+
+#---------------------------------------------------------------------------------
+# For EEZ definitions 
+#---------------------------------------------------------------------------------
+
+# https://nauticalcharts.noaa.gov/data/us-maritime-limits-and-boundaries.html
+
+eez <- read_sf(paste(dir,"CUFES.Survey/EEZ/USMaritimeLimitsNBoundaries.shp", sep = ""))
+
+#---------------------------------------------------------------------------------
+# Putting it all together
+#---------------------------------------------------------------------------------
+
+hlines <- eez %>%
+  filter(REGION == "Pacific Coast") %>%
+  mutate(
+    # Create southern US EEZ boundary
+    ymin = st_bbox(.)["ymin"],
+    # Create northern US EEZ boundary
+    ymax = st_bbox(.)["ymax"],
+    # Create northern stock boundary (Westernmost Point, CA)
+    nstock = 40.4385,
+    # Create southern stock boundary (Point Conception, CA)
+    point.concept = 34.4486)
+
+```
+
+# Add cities
+
+To make the map easier to interpret, add the names and locations of most populated cites
+
+```{r, add.map.details}
+
+#---------------------------------------------------------------------------------
+# populated areas (cities and city names)
+#---------------------------------------------------------------------------------
+
+Populated10 <- ne_download(scale = 110, type = "populated_places_simple", 
+                           category = "cultural", 
+                           returnclass = "sf") %>%
+  st_intersection(PacificCoast4)
+
+#---------------------------------------------------------------------------------
+# Plot definitions
+#---------------------------------------------------------------------------------
+
+ggplot() +
+  geom_hline(data = hlines, aes(yintercept = nstock), col = "blue", 
+             linewidth = 0.7, linetype = "dashed") +
+  geom_hline(data = hlines, aes(yintercept = point.concept), col = "red", 
+             linewidth = 0.7, linetype = "longdash") +
+  geom_hline(data = hlines, aes(yintercept = ymin), col = "black", 
+             linewidth = 0.7) +
+  geom_hline(data = hlines, aes(yintercept = ymax), col = "black", 
+             linewidth = 0.7) +
+  geom_sf(data = PacificCoast4,
+          color = "#ae8f60", 
+          size = 0.7, 
+          fill = "#E1C699") +
+  geom_sf(data = PCoastStates,
+          color = "#ae8f60", 
+          size = 0.7, 
+          fill = "#E1C699") +
+  geom_sf(data = Populated10, col = "black") +
+  geom_text(data = Populated10,
+            aes(x = longitude, y = latitude, label = name),
+            col = "black", 
+            position = position_dodge(width = 1),
+            vjust = 1) +
+  scale_y_continuous(limits = c(27,55), 
+                     breaks = lat_breaks, 
+                     labels = lat_labels, 
+                     expand = c(0.05, 0.05)) +
+  labs(y = "Latitude") +
+  geom_sf(data = PreAbs, col = "black")
+
+  
+```
+
+# Create boundary files
+
+Note that the min and max of the plot should have great spatial bound across all data sets and that this will likely change in the next iteration.
+
+```{r, define.OM.box.extents}
+
+#---------------------------------------------------------------------------------
+# Find extent of CPS ATM Survey
+#---------------------------------------------------------------------------------
+
+PreAbs.sf <- PreAbs %>%
+  st_as_sf(.,coords = c("LON","LAT"), crs = 4326)
+
+st_bbox(PreAbs.sf)
+#       xmin       ymin       xmax       ymax 
+# -132.75425   28.65305 -114.82055   54.29885 
+
+#---------------------------------------------------------------------------------
+# Check other data values to determine spatial extent
+#---------------------------------------------------------------------------------
+
+CUFES.sf <- CUFES %>%
+  st_as_sf(.,coords = c("LON","LAT"), crs = 4326)
+
+st_bbox(CUFES.sf)
+#       xmin       ymin       xmax       ymax 
+# -134.11630   29.83314 -117.21575   54.74310 
+
+
+```
+
+# Create 5 spatial OMs files
+
+Note the the observation extent should first be used to define the outer min and max spatial boundaries. 
+
+```{r, define.OM.box.bounds}
+
+#-------------------------------------------------------------------------------------
+# Define data boundaries
+#-------------------------------------------------------------------------------------
+
+xmin = -134.11630
+ymin = 28.65305
+xmax = -114.35
+ymax = 54.74310
+
+#-------------------------------------------------------------------------------------
+# For Northern US EEZ to Inf
+#-------------------------------------------------------------------------------------
+
+z1.bbox_coords <- c(xmin, unique(hlines$ymax), xmax, ymax)
+names(z1.bbox_coords) = c("xmin","ymin","xmax","ymax")
+
+z1bbp <- st_as_sfc(st_bbox(z1.bbox_coords)) 
+st_crs(z1bbp) = 4326
+
+st_bbox(z1bbp)
+
+#-------------------------------------------------------------------------------------
+# For Northern stock to Northern US EEZ
+#-------------------------------------------------------------------------------------
+
+z2.bbox_coords <- c(xmin, unique(hlines$nstock), xmax, unique(hlines$ymax))
+names(z2.bbox_coords) = c("xmin","ymin","xmax","ymax")
+
+z2bbp <- st_as_sfc(st_bbox(z2.bbox_coords)) 
+st_crs(z2bbp) = 4326
+
+st_bbox(z2bbp)
+
+#-------------------------------------------------------------------------------------
+# For Southern stock to Northern stock
+#-------------------------------------------------------------------------------------
+
+z3.bbox_coords <- c(xmin, unique(hlines$point.concept), xmax,
+                    unique(hlines$nstock))
+names(z3.bbox_coords) = c("xmin","ymin","xmax","ymax")
+
+z3bbp <- st_as_sfc(st_bbox(z3.bbox_coords))
+st_crs(z3bbp) = 4326
+
+st_bbox(z3bbp)
+
+#-------------------------------------------------------------------------------------
+# For Southern US EEZ to Southern stock
+#-------------------------------------------------------------------------------------
+
+z4.bbox_coords <- c(xmin, unique(hlines$ymin), xmax,
+                    unique(hlines$point.concept))
+names(z4.bbox_coords) = c("xmin","ymin","xmax","ymax")
+
+z4bbp <- st_as_sfc(st_bbox(z4.bbox_coords))
+st_crs(z4bbp) = 4326
+
+st_bbox(z4bbp)
+
+#-------------------------------------------------------------------------------------
+# For Inf to Southern US EEZ
+#-------------------------------------------------------------------------------------
+
+z5.bbox_coords <- c(xmin, ymin, xmax, unique(hlines$ymin))
+names(z5.bbox_coords) = c("xmin","ymin","xmax","ymax")
+
+z5bbp <- st_as_sfc(st_bbox(z5.bbox_coords))
+st_crs(z5bbp) = 4326
+
+st_bbox(z5bbp)
+
+```
+
+# Check OM spatial layout
+
+This will give us an idea if the previous definitions are appropriate.
+
+```{r, plot.OM.box.extents}
+
+area.diams <-
+  ggplot() +
+  geom_sf(data = z1bbp, fill = "lightgrey", col = "black", alpha = 0.5) +
+  geom_sf(data = z2bbp, fill = "blue", col = "black", alpha = 0.5) +
+  geom_sf(data = z3bbp, fill = "lightgreen", col = "black", alpha = 0.5) +
+  geom_sf(data = z4bbp, fill = "green", col = "black", alpha = 0.5) +
+  geom_sf(data = z5bbp, fill = "steelblue", col = "black", alpha = 0.5) +
+  geom_sf(data = PacificCoast4,
+          color = "#ae8f60", 
+          size = 0.7, 
+          fill = "#E1C699") +
+  geom_sf(data = PCoastStates,
+          color = "#ae8f60", 
+          size = 0.7, 
+          fill = "#E1C699") +
+  geom_sf(data = Populated10, col = "black") +
+  geom_text(data = Populated10,
+            aes(x = longitude, y = latitude, label = name),
+            col = "black", 
+            position = position_dodge(width = 1),
+            vjust = 1) +
+  scale_y_continuous(limits = c(27,55), 
+                     breaks = lat_breaks, 
+                     labels = lat_labels, 
+                     expand = c(0.05, 0.05)) +
+  labs(y = "Latitude")
+
+
+ggsave2(filename=paste("Area.Definitions.jpeg",sep=''), plot=area.diams,
+        device="jpeg", path=paste(dir,"ATM.Survey/Figures/OMs",sep=""),
+        dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
+```
+
+# Calculate the centroid of the OM spatial areas
+
+Because it would be too difficult to reconstruct the sunrise and sunset for each geographic point, take the centre of each spatial area extent and calculate the average sunrise and sunset to be used to group the transects. Because we are looking at data from UTM zone 10 and UTM zone 11 use the USA Contiguous Albers Equal Area Conic project (ESRI:102003).
+The corresponding ESPG code for ESRI:102003 is 5070.
+
+## Identifty the geographic centers of the spatial area extents
+
+```{r, central.geodatic.vals}
+
+#----------------------------------------------------------------------------
+# Area 1
+#----------------------------------------------------------------------------
+
+area1 <- st_as_sfc(st_bbox(z1bbp), crs = st_crs(4326)) %>%
+  st_transform(., crs = st_crs(5070))
+
+area1.vals <- st_coordinates(st_centroid(area1)) 
+
+area1.t <- as.data.frame(area1.vals)
+
+area1.vals2 <- st_as_sf(area1.t, coords = c("X", "Y"), crs = st_crs(5070)) %>%
+  st_transform(.,crs=st_crs(4326)) %>% 
+        mutate(LON = unlist(map(.$geometry,1)), 
+               LAT = unlist(map(.$geometry,2))) %>%
+        st_drop_geometry()
+
+#----------------------------------------------------------------------------
+# Area 2
+#----------------------------------------------------------------------------
+
+area2 <- st_as_sfc(st_bbox(z2bbp), crs = st_crs(4326)) %>%
+  st_transform(., crs = st_crs(5070))
+
+area2.vals <- st_coordinates(st_centroid(area2)) 
+
+area2.t <- as.data.frame(area2.vals)
+
+area2.vals2 <- st_as_sf(area2.t, coords = c("X", "Y"), crs = st_crs(5070)) %>%
+  st_transform(.,crs=st_crs(4326)) %>% 
+        mutate(LON = unlist(map(.$geometry,1)), 
+               LAT = unlist(map(.$geometry,2))) %>%
+        st_drop_geometry()
+
+#----------------------------------------------------------------------------
+# Area 3
+#----------------------------------------------------------------------------
+
+area3 <- st_as_sfc(st_bbox(z3bbp), crs = st_crs(4326)) %>%
+  st_transform(., crs = st_crs(5070))
+
+area3.vals <- st_coordinates(st_centroid(area3)) 
+
+area3.t <- as.data.frame(area3.vals)
+
+area3.vals2 <- st_as_sf(area3.t, coords = c("X", "Y"), crs = st_crs(5070)) %>%
+  st_transform(.,crs=st_crs(4326)) %>% 
+        mutate(LON = unlist(map(.$geometry,1)), 
+               LAT = unlist(map(.$geometry,2))) %>%
+        st_drop_geometry()
+
+#----------------------------------------------------------------------------
+# Area 4
+#----------------------------------------------------------------------------
+
+area4 <- st_as_sfc(st_bbox(z4bbp), crs = st_crs(4326)) %>%
+  st_transform(., crs = st_crs(5070))
+
+area4.vals <- st_coordinates(st_centroid(area4)) 
+
+area4.t <- as.data.frame(area4.vals)
+
+area4.vals2 <- st_as_sf(area4.t, coords = c("X", "Y"), crs = st_crs(5070)) %>%
+  st_transform(.,crs=st_crs(4326)) %>% 
+        mutate(LON = unlist(map(.$geometry,1)), 
+               LAT = unlist(map(.$geometry,2))) %>%
+        st_drop_geometry()
+
+#----------------------------------------------------------------------------
+# Area 5
+#----------------------------------------------------------------------------
+
+area5 <- st_as_sfc(st_bbox(z5bbp), crs = st_crs(4326)) %>%
+  st_transform(., crs = st_crs(5070))
+
+area5.vals <- st_coordinates(st_centroid(area5)) 
+
+area5.t <- as.data.frame(area5.vals)
+
+area5.vals2 <- st_as_sf(area5.t, coords = c("X", "Y"), crs = st_crs(5070)) %>%
+  st_transform(.,crs=st_crs(4326)) %>% 
+        mutate(LON = unlist(map(.$geometry,1)), 
+               LAT = unlist(map(.$geometry,2))) %>%
+        st_drop_geometry()
+
+```
+
+## Extract sunrise and sunset data
+
+```{r, sunrise.table}
+
+# Define bin centroids
+bins <- tibble::tibble(
+  Area_id = 1:5,
+  lat = c(area1.vals2$LAT, area2.vals2$LAT, area3.vals2$LAT, area4.vals2$LAT,
+          area5.vals2$LAT), 
+  lon = c(area1.vals2$LON, area2.vals2$LON, area3.vals2$LON, area4.vals2$LON,
+          area5.vals2$LON)
+)
+
+# Create daily date range
+dates <- seq.Date(from = as.Date("2003-01-01"), to = as.Date("2024-12-31"), 
+                  by = "day")
+
+# Function to compute sunrise/sunset per bin per date
+get_sun_times <- function(Area_id, lat, lon, date) {
+  times <- getSunlightTimes(date = date, 
+                            lat = lat, 
+                            lon = lon, 
+                            keep = c("sunrise","sunset"), 
+                            tz = "America/Los_Angeles")
+  tibble(
+    Area_id = Area_id,
+    date = date,
+    sunrise_pacific = times$sunrise,
+    sunset_pacific = times$sunset,
+    lat = lat,
+    lon = lon
+  )
+}
+
+# Apply across all bins and dates
+sun_times <- map_dfr(dates, function(date) {
+  map_dfr(1:nrow(bins), function(i) {
+    get_sun_times(bins$Area_id[i], bins$lat[i], bins$lon[i], date)
+  })
+})
+
+# Format times (optional)
+sun_times <- sun_times %>%
+  mutate(
+    sunrise_pacific = format(sunrise_pacific, "%H:%M:%S"),
+    sunset_pacific = format(sunset_pacific, "%H:%M:%S")
+  )
+
+# Combine date and time to create POSIXct datetime in and force time zone to PST or PDT
+sun_times <- sun_times %>%
+  mutate(
+    sunrise_pacific = ymd_hms(paste(date, sunrise_pacific),  
+                              tz = "America/Los_Angeles"),
+    sunset_pacific = ymd_hms(paste(date, sunset_pacific), 
+                             tz = "America/Los_Angeles")
+  )
+
+# Save as CSV
+fwrite(sun_times, file = paste(dir,"ATM.Survey/sunrise_sunset_times.csv",
+                               sep=""), sep = ";")
+
+sun_times <- sun_times %>% 
+  select(-c(lat, lon)) %>%
+  mutate(Area_id = as.factor(Area_id))
+
+```
+
+# Create map figures
+
+## Create common indices
+
+Project the data and create and area, season, and data index.
+
+```{r, proj.and.common.scales}
+
+# Create Multipolygon layer of OM box extents
+bbox.frame <- st_sf(Area_id = 1:5, geometry = c(area1, area2, area3, area4, area5))
+
+# Project data
+PreAbs <- PreAbs %>%
+  st_transform(.,crs = st_crs(5070)) %>%
+  mutate(date = as_date(equilibrium_time))
+  
+```
+
+## Spatially overlay data and area definitions
+
+Note that ESIRI does not allow for DateTime and that this will need adjusted in the next step.
+
+```{r}
+
+# Calculate intersected geometries
+t <- st_intersection(PreAbs, bbox.frame)
+
+head(t)
+
+# Compute length of overlaps
+t <- t %>%
+  mutate(overlap_length = st_length(geometry))
+
+# Select the polygon with the greatest overlap for each line
+best_matches <- t %>%
+  group_by(collection) %>%
+  slice_max(overlap_length, with_ties = FALSE) %>%
+  ungroup() %>%
+  st_drop_geometry()
+
+dim(best_matches)
+# [1] 10887    21
+
+dim(t)
+# [1] 10887    21
+
+identical(best_matches, t)
+# [1] FALSE
+
+best_matches$Area_id - t$Area_id
+best_matches$collection - t$collection
+
+
+# Join best fitted Area definitions back to transect data (if needed)
+area.transects <- PreAbs %>% 
+  left_join(best_matches %>% select(collection, Area_id), by = "collection") %>%
+  mutate(Area_id = as.factor(Area_id))
+
+head(area.transects)
+
+```
+
+
+```{r}
+
+area.transects2 <- inner_join(area.transects, sun_times, by = c("Area_id", "date"))
+  
+# Filter hauls that are taken before 
+# sunset time that are after sunrise time
+area.transects.d <- area.transects2 %>%
+  group_by(date) %>%
+  filter(equilibrium_time >= sunrise_pacific) %>%
+  mutate(cluster.grp = "dayTrawl") %>%
+  ungroup()
+  
+# Filter hauls that are taken before 
+# sunrise time that are after sunset time
+area.transects.n <- area.transects2 %>%
+  group_by(date) %>%
+  filter(equilibrium_time < sunrise_pacific |
+           equilibrium_time >= sunset_pacific) %>%
+  mutate(cluster.grp = "nghtTrawl") %>%
+  ungroup()
+  
+# Join spatial objects and convert DateTime values to character 
+# string (ESIRI does not work with DateTime)
+area.transects.final <- rbind(area.transects.d, area.transects.n) %>%
+  mutate(equilibrium_time = as.character(equilibrium_time),
+         sunrise_pacific = as.character(sunrise_pacific),
+         sunset_pacific = as.character(sunset_pacific))
+
+# Make a 100 m spatial buffer around each transect
+area.transects.buff <- st_buffer(area.transects.final, 100)
+
+View(area.transects.buff)
+  
+# Save shapefile
+write_sf(area.transects.buff, 
+         file.path(dir, "ATM.Survey/Shapefiles/area.transects.shp", sep = ""))
+
+# Test if function works
+test.vals <- read_sf(paste(dir,"ATM.Survey/Shapefiles/area.transects.shp", sep=""))
+# View(test.vals)
+
+```
+
+# Sum haul samples
+
+## For Area 1
+
+```{r, sum.over.clusters.area.1}
+
+area1.hauls <- read_sf(paste(dir,"ATM.Survey/Shapefiles/area.transects.shp", sep="")) %>%
+  filter(Area_id == 1)
+
+View(area1.hauls)
+
+# Sum over like values
+area1.sum.prep <- area1.hauls %>%
+  group_by(tim_stp) %>%
+  # How many hauls are in the area
+  mutate(Hauls = n_distinct(keys)) %>%
+  # How many clusters are in the area
+  mutate(keys2 = paste(date, clstr_g, sep = "-")) %>%
+  mutate(NbClust = n_distinct(keys2)) %>%
+  ungroup() %>%
+  select(-c(collctn, keys, keys2)) %>%
+  group_by(Year, Month, Season, tim_stp, date, clstr_g, Area_id, NbClust, Hauls) %>%
+  summarise(geometry = st_union(geometry)) %>%
+  mutate(Area = st_area(geometry)) %>%
+  ungroup() 
+
+area1.sum <- area1.hauls %>% 
+  select(-c(collctn, keys)) %>%
+  group_by(Year, Month, Season, tim_stp, date, stndrd_, len_bin, 
+           clstr_g, Area_id, age) %>%  
+  mutate(Ctch_wt = sum(Ctch_wt),
+         NBRE_IN = sum(NBRE_IN),
+         Total_N = sum(Total_N),
+         CtchWgL = sum(CtchWgL)) %>%
+  ungroup() %>%
+  st_drop_geometry()
+  
+area1.hauls.new <- inner_join(area1.sum.prep, area1.sum)
+
+attributes(area1.hauls.new$Area) = NULL
+
+area1.polygons <- area1.hauls.new %>%
+  mutate(Area_km2 = round(Area/1000, 2))
+
+write_sf(area1.polygons, paste(dir,"ATM.Survey/Shapefiles/area1.polygons.shp", sep=""))
+
+area1.clst.plot <-
+  ggplot() + 
+  geom_sf(data = area1.polygons, aes(fill = Area), col = "black") +
+  scale_fill_viridis_b()
+
+ggsave2(filename=paste("clstsArea1.jpeg",sep=''), plot=area1.clst.plot,
+        device="jpeg", path=paste(dir,"ATM.Survey/Figures/OMs",sep=""),
+        dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
+
+##------------------------------------------------------------------------------------
+# Create summary table over area extent
+#-------------------------------------------------------------------------------------
+
+area1.summary <- area1.polygons %>% 
+  mutate(Date = as.Date(date)) %>% 
+  # separate out date elements (note the other way would be to rename a vectored list) 
+  separate(Date, into = c("Year", "Month", "Day")) %>%
+  # Create a numeric index of Month Day combination to sort on
+  mutate(MonthDay.num = as.numeric(paste(Month, Day, sep = ""))) %>%
+  # Create abbreviated month value
+  mutate(Month = month.abb[as.numeric(Month)],
+         Year = as.numeric(Year)) %>%
+  # Create Month day label
+  mutate(MonthDay = paste(Month, ". ", Day, sep = ""))  
+  
+# Summarize the latitudinal range, the corresponding months and days sampled
+# per season, the number of number hauls, the number of individuals estimated
+# per season, the range of lengths measured, the range of ages estimated, 
+# the number of individuals sampled within each haul
+Hauls.N <- area1.summary %>%
+    group_by(tim_stp) %>% # Group Year and Season
+    arrange(MonthDay.num, .by_group = TRUE) %>%
+    mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay)),
+           Absent_hauls = sum(is.na(stndrd_)),
+           Hauls = Hauls, 
+           Latitudes = paste(min(LAT), " - ",  
+                             max(LAT), sep = ""),
+           NbClust = NbClust,
+           Area_range = paste(min(Area_km2), " - ", 
+                              max(Area_km2), sep = "")) %>%
+    ungroup() %>%
+    st_drop_geometry()
+  
+#---------------------------------------------------------------------------
+# If there are presence observations, find length range and create
+# Observation code.
+#---------------------------------------------------------------------------
+
+# Note that if more than one time.step value exists, it means more than one
+# observation is present!
+Hauls.N.p1 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() == 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(stndrd_, " cm", sep = ""),
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p2 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() > 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(min(na.omit(stndrd_)), " - ",
+                         max(na.omit(stndrd_)), 
+                         " cm", sep = ""),
+         Ages = if (n_distinct(age) > 1) {
+           paste(min(na.omit(age)), " - ",
+                 max(na.omit(age)), " yrs")
+           }else{
+             paste(age, " yrs")
+             },
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p <- rbind(Hauls.N.p1, Hauls.N.p2)
+  
+# If there are no presence observations, write absent and create
+# Observation code
+Hauls.N.a <- Hauls.N %>%
+  filter(is.na(stndrd_) & !tim_stp %in% Hauls.N.p$tim_stp) %>%
+  mutate(Lengths = NA,
+         Ages = NA,
+         N = 0, 
+         n = 0)
+  
+# Merge presence absence data tables
+Hauls.N2 <- rbind(Hauls.N.p, Hauls.N.a)
+  
+head(Hauls.N2) 
+sort(unique(Hauls.N2$Year))
+  
+# Create an index
+EntryID <- seq_len(length(unique(Hauls.N2$tim_stp)))
+Year <- as.numeric(substr(unique(Hauls.N2$tim_stp),1,4))
+          
+EntryID.df <- data.frame(EntryID, Year)
+EntryID.df$Year <- EntryID.df$Year
+          
+# Join everything together
+CPS.summary.table <- inner_join(Hauls.N2, EntryID.df)
+CPS.summary.table
+          
+# Group file output with entry id
+dup.survey <- distinct(CPS.summary.table) %>%
+  mutate(Area = "OM Sptl. Area 1")
+
+dup.survey.area1 <- distinct(dup.survey[,c("Area", "EntryID", "Year", "Season", "MonthDay",
+                                           "Hauls", "NbClust", "Area_range", "N",
+                                           "Absent_hauls", "Lengths", "Ages", "n",
+                                           "Latitudes")])
+  
+names(dup.survey.area1) <- c("OM Sptl. Area", "ID", "Year", "Season", "MonthDay", "Hauls",
+                             "Nb. Clusters", "Are Sampled (km2)", "N Est.", 
+                             "Nb. Absent Hauls", "Lengths", "Est. Ages", "n", "Latitudes") 
+  
+
+
+```
+
+## For Area 2
+
+```{r, sum.over.clusters.area.2}
+
+area2.hauls <- read_sf(paste(dir,"ATM.Survey/Shapefiles/area.transects.shp", sep="")) %>%
+  filter(Area_id == 2)
+
+# View(area2.hauls)
+
+# Sum over like values
+area2.sum.prep <- area2.hauls %>%
+  group_by(tim_stp) %>%
+  # How many hauls are in the area
+  mutate(Hauls = n_distinct(keys)) %>%
+  # How many clusters are in the area
+  mutate(keys2 = paste(date, clstr_g, sep = "-")) %>%
+  mutate(NbClust = n_distinct(keys2)) %>%
+  ungroup() %>%
+  select(-c(collctn, keys, keys2)) %>%
+  group_by(Year, Month, Season, tim_stp, date, clstr_g, Area_id, NbClust, Hauls) %>%
+  summarise(geometry = st_union(geometry)) %>%
+  mutate(Area = st_area(geometry)) %>%
+  ungroup() 
+
+area2.sum <- area2.hauls %>% 
+  select(-c(collctn, keys)) %>%
+  group_by(Year, Month, Season, tim_stp, date, stndrd_, len_bin, 
+           clstr_g, Area_id, age) %>%  
+  mutate(Ctch_wt = sum(Ctch_wt),
+         NBRE_IN = sum(NBRE_IN),
+         Total_N = sum(Total_N),
+         CtchWgL = sum(CtchWgL)) %>%
+  ungroup() %>%
+  st_drop_geometry()
+  
+area2.hauls.new <- inner_join(area2.sum.prep, area2.sum)
+
+attributes(area2.hauls.new$Area) = NULL
+
+area2.polygons <- area2.hauls.new %>%
+  mutate(Area_km2 = round(Area/1000, 2))
+
+write_sf(area2.polygons, paste(dir,"ATM.Survey/Shapefiles/area2.polygons.shp",
+                               sep=""))
+
+area2.clst.plot <-
+  ggplot() + 
+  geom_sf(data = area2.polygons, aes(fill = Area), col = "black") +
+  scale_fill_viridis_b()
+
+ggsave2(filename=paste("clstsArea2.jpeg",sep=''), plot=area2.clst.plot,
+        device="jpeg", path=paste(dir,"ATM.Survey/Figures/OMs",sep=""),
+        dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
+
+##------------------------------------------------------------------------------------
+# Create summary table over area extent
+#-------------------------------------------------------------------------------------
+
+area2.summary <- area2.polygons %>% 
+  mutate(Date = as.Date(date)) %>% 
+  # separate out date elements (note the other way would be to rename a vectored list) 
+  separate(Date, into = c("Year", "Month", "Day")) %>%
+  # Create a numeric index of Month Day combination to sort on
+  mutate(MonthDay.num = as.numeric(paste(Month, Day, sep = ""))) %>%
+  # Create abbreviated month value
+  mutate(Month = month.abb[as.numeric(Month)],
+         Year = as.numeric(Year)) %>%
+  # Create Month day label
+  mutate(MonthDay = paste(Month, ". ", Day, sep = ""))  
+  
+# Summarize the latitudinal range, the corresponding months and days sampled
+# per season, the number of number hauls, the number of individuals estimated
+# per season, the range of lengths measured, the range of ages estimated, 
+# the number of individuals sampled within each haul
+Hauls.N <- area2.summary %>%
+    group_by(tim_stp) %>% # Group Year and Season
+    arrange(MonthDay.num, .by_group = TRUE) %>%
+    mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay)),
+           Absent_hauls = sum(is.na(stndrd_)),
+           Hauls = Hauls, 
+           Latitudes = paste(min(LAT), " - ",  
+                             max(LAT), sep = ""),
+           NbClust = NbClust,
+           Area_range = paste(min(Area_km2), " - ", 
+                              max(Area_km2), sep = "")) %>%
+    ungroup() %>%
+    st_drop_geometry()
+  
+#---------------------------------------------------------------------------
+# If there are presence observations, find length range and create
+# Observation code.
+#---------------------------------------------------------------------------
+  
+# Note that if more than one time.step value exists, it means more than one
+# observation is present!
+Hauls.N.p1 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() == 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(stndrd_, " cm", sep = ""),
+         Ages = paste(age, " yrs", sep = ""),
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+
+Hauls.N.p2 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() > 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(min(na.omit(stndrd_)), " - ",
+                         max(na.omit(stndrd_)), 
+                         " cm", sep = ""),
+         Ages = if (n_distinct(age) > 1) {
+           paste(min(na.omit(age)), " - ",
+                 max(na.omit(age)), " yrs")
+           }else{
+             paste(age, " yrs")
+             },
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p <- rbind(Hauls.N.p1, Hauls.N.p2)
+  
+# If there are no presence observations, write absent and create
+# Observation code
+Hauls.N.a <- Hauls.N %>%
+  filter(is.na(stndrd_) & !tim_stp %in% Hauls.N.p$tim_stp) %>%
+  mutate(Lengths = NA,
+         Ages = NA,
+         N = 0, 
+         n = 0)
+  
+# Merge presence absence data tables
+Hauls.N2 <- rbind(Hauls.N.p, Hauls.N.a)
+  
+head(Hauls.N2) 
+sort(unique(Hauls.N2$Year))
+  
+# Create an index
+EntryID <- seq_len(length(unique(Hauls.N2$tim_stp)))
+Year <- as.numeric(substr(unique(Hauls.N2$tim_stp),1,4))
+          
+EntryID.df <- data.frame(EntryID, Year)
+EntryID.df$Year <- EntryID.df$Year
+          
+# Join everything together
+CPS.summary.table <- inner_join(Hauls.N2, EntryID.df)
+CPS.summary.table
+          
+# Group file output with entry id
+dup.survey <- distinct(CPS.summary.table) %>%
+  mutate(Area = "OM Sptl. Area 2")
+
+dup.survey.area2 <- distinct(dup.survey[,c("Area", "EntryID", "Year", "Season", "MonthDay",
+                                           "Hauls", "NbClust", "Area_range", "N",
+                                           "Absent_hauls", "Lengths", "Ages", "n",
+                                           "Latitudes")])
+  
+names(dup.survey.area2) <- c("OM Sptl. Area", "ID", "Year", "Season", "MonthDay", "Hauls",
+                             "Nb. Clusters", "Are Sampled (km2)", "N Est.", 
+                             "Nb. Absent Hauls", "Lengths", "Est. Ages", "n", "Latitudes") 
+
+```
+
+## For Area 3
+
+```{r, sum.over.clusters.area.3}
+
+area3.hauls <- read_sf(paste(dir,"ATM.Survey/Shapefiles/area.transects.shp", sep="")) %>%
+  filter(Area_id == 3)
+
+# View(area3.hauls)
+
+# Sum over like values
+area3.sum.prep <- area3.hauls %>%  
+  group_by(tim_stp) %>%
+  # How many hauls are in the area
+  mutate(Hauls = n_distinct(keys)) %>%
+  # How many clusters are in the area
+  mutate(keys2 = paste(date, clstr_g, sep = "-")) %>%
+  mutate(NbClust = n_distinct(keys2)) %>%
+  ungroup() %>%
+  select(-c(collctn, keys, keys2)) %>%
+  group_by(Year, Month, Season, tim_stp, date, clstr_g, Area_id, NbClust, Hauls) %>%
+  summarise(geometry = st_union(geometry)) %>%
+  mutate(Area = st_area(geometry)) %>%
+  ungroup() 
+
+area3.sum <- area3.hauls %>% 
+  select(-c(collctn, keys)) %>%
+  group_by(Year, Month, Season, tim_stp, date, stndrd_, len_bin, 
+           clstr_g, Area_id, age) %>%  
+  mutate(Ctch_wt = sum(Ctch_wt),
+         NBRE_IN = sum(NBRE_IN),
+         Total_N = sum(Total_N),
+         CtchWgL = sum(CtchWgL)) %>%
+  ungroup() %>%
+  st_drop_geometry()
+  
+area3.hauls.new <- inner_join(area3.sum.prep, area3.sum)
+
+attributes(area3.hauls.new$Area) = NULL
+
+area3.polygons <- area3.hauls.new %>%
+  mutate(Area_km2 = round(Area/1000, 2))
+
+write_sf(area3.polygons, paste(dir,"ATM.Survey/Shapefiles/area3.polygons.shp",
+                               sep=""))
+
+area3.clst.plot <-
+  ggplot() + 
+  geom_sf(data = area3.polygons, aes(fill = Area), col = "black") +
+  scale_fill_viridis_b()
+
+ggsave2(filename=paste("clstsArea3.jpeg",sep=''), plot=area3.clst.plot,
+        device="jpeg", path=paste(dir,"ATM.Survey/Figures/OMs",sep=""),
+        dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
+
+##------------------------------------------------------------------------------------
+# Create summary table over area extent
+#-------------------------------------------------------------------------------------
+
+area3.summary <- area3.polygons %>% 
+  mutate(Date = as.Date(date)) %>% 
+  # separate out date elements (note the other way would be to rename a vectored list) 
+  separate(Date, into = c("Year", "Month", "Day")) %>%
+  # Create a numeric index of Month Day combination to sort on
+  mutate(MonthDay.num = as.numeric(paste(Month, Day, sep = ""))) %>%
+  # Create abbreviated month value
+  mutate(Month = month.abb[as.numeric(Month)],
+         Year = as.numeric(Year)) %>%
+  # Create Month day label
+  mutate(MonthDay = paste(Month, ". ", Day, sep = ""))  
+  
+# Summarize the latitudinal range, the corresponding months and days sampled
+# per season, the number of number hauls, the number of individuals estimated
+# per season, the range of lengths measured, the range of ages estimated, 
+# the number of individuals sampled within each haul
+Hauls.N <- area3.summary %>%
+    group_by(tim_stp) %>% # Group Year and Season
+    arrange(MonthDay.num, .by_group = TRUE) %>%
+    mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay)),
+           Absent_hauls = sum(is.na(stndrd_)),
+           Hauls = Hauls, 
+           Latitudes = paste(min(LAT), " - ",  
+                             max(LAT), sep = ""),
+           NbClust = NbClust,
+           Area_range = paste(min(Area_km2), " - ", 
+                              max(Area_km2), sep = "")) %>%
+    ungroup() %>%
+    st_drop_geometry()
+  
+#---------------------------------------------------------------------------
+# If there are presence observations, find length range and create
+# Observation code.
+#---------------------------------------------------------------------------
+  
+# Note that if more than one time.step value exists, it means more than one
+# observation is present!
+Hauls.N.p1 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() == 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(stndrd_, " cm", sep = ""),
+         Ages = paste(age, " yrs", sep = ""),
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p2 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() > 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(min(na.omit(stndrd_)), " - ",
+                         max(na.omit(stndrd_)), 
+                         " cm", sep = ""),
+         Ages = if (n_distinct(age) > 1) {
+           paste(min(na.omit(age)), " - ",
+                 max(na.omit(age)), " yrs")
+           }else{
+             paste(age, " yrs")
+             },
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p <- rbind(Hauls.N.p1, Hauls.N.p2)
+  
+# If there are no presence observations, write absent and create
+# Observation code
+Hauls.N.a <- Hauls.N %>%
+  filter(is.na(stndrd_) & !tim_stp %in% Hauls.N.p$tim_stp) %>%
+  mutate(Lengths = NA,
+         Ages = NA,
+         N = 0, 
+         n = 0)
+  
+# Merge presence absence data tables
+Hauls.N2 <- rbind(Hauls.N.p, Hauls.N.a)
+  
+head(Hauls.N2) 
+sort(unique(Hauls.N2$Year))
+  
+# Create an index
+EntryID <- seq_len(length(unique(Hauls.N2$tim_stp)))
+Year <- as.numeric(substr(unique(Hauls.N2$tim_stp),1,4))
+          
+EntryID.df <- data.frame(EntryID, Year)
+EntryID.df$Year <- EntryID.df$Year
+          
+# Join everything together
+CPS.summary.table <- inner_join(Hauls.N2, EntryID.df)
+CPS.summary.table
+          
+# Group file output with entry id
+dup.survey <- distinct(CPS.summary.table) %>%
+  mutate(Area = "OM Sptl. Area 3")
+
+dup.survey.area3 <- distinct(dup.survey[,c("Area", "EntryID", "Year", "Season", "MonthDay",
+                                           "Hauls", "NbClust", "Area_range", "N",
+                                           "Absent_hauls", "Lengths", "Ages", "n",
+                                           "Latitudes")])
+  
+names(dup.survey.area3) <- c("OM Sptl. Area", "ID", "Year", "Season", "MonthDay", "Hauls",
+                             "Nb. Clusters", "Are Sampled (km2)", "N Est.", 
+                             "Nb. Absent Hauls", "Lengths", "Est. Ages", "n", "Latitudes") 
+
+
+```
+
+## For Area 4
+
+```{r, sum.over.clusters.area.4}
+
+area4.hauls <- read_sf(paste(dir,"ATM.Survey/Shapefiles/area.transects.shp", sep="")) %>%
+  filter(Area_id == 4)
+
+# View(area4.hauls)
+
+# Sum over like values
+area4.sum.prep <- area4.hauls %>%
+  group_by(tim_stp) %>%
+  # How many hauls are in the area
+  mutate(Hauls = n_distinct(keys)) %>%
+  # How many clusters are in the area
+  mutate(keys2 = paste(date, clstr_g, sep = "-")) %>%
+  mutate(NbClust = n_distinct(keys2)) %>%
+  ungroup() %>%
+  select(-c(collctn, keys, keys2)) %>%
+  group_by(Year, Month, Season, tim_stp, date, clstr_g, Area_id, NbClust, Hauls) %>%
+  summarise(geometry = st_union(geometry)) %>%
+  mutate(Area = st_area(geometry)) %>%
+  ungroup()  
+
+area4.sum <- area4.hauls %>%  
+  select(-c(collctn, keys)) %>%
+  group_by(Year, Month, Season, tim_stp, date, stndrd_, len_bin, 
+           clstr_g, Area_id, age) %>%  
+  mutate(Ctch_wt = sum(Ctch_wt),
+         NBRE_IN = sum(NBRE_IN),
+         Total_N = sum(Total_N),
+         CtchWgL = sum(CtchWgL)) %>%
+  ungroup() %>%
+  st_drop_geometry()
+  
+area4.hauls.new <- inner_join(area4.sum.prep, area4.sum)
+
+attributes(area4.hauls.new$Area) = NULL
+
+area4.polygons <- area4.hauls.new %>%
+  mutate(Area_km2 = round(Area/1000, 2))
+
+write_sf(area4.polygons, paste(dir,"ATM.Survey/Shapefiles/area4.polygons.shp",
+                               sep=""))
+
+area4.clst.plot <-
+  ggplot() + 
+  geom_sf(data = area4.polygons, aes(fill = Area), col = "black") +
+  scale_fill_viridis_b()
+
+ggsave2(filename=paste("clstsArea4.jpeg",sep=''), plot=area4.clst.plot,
+        device="jpeg", path=paste(dir,"ATM.Survey/Figures/OMs",sep=""),
+        dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
+
+##------------------------------------------------------------------------------------
+# Create summary table over area extent
+#-------------------------------------------------------------------------------------
+
+area4.summary <- area4.polygons %>% 
+  mutate(Date = as.Date(date)) %>% 
+  # separate out date elements (note the other way would be to rename a vectored list) 
+  separate(Date, into = c("Year", "Month", "Day")) %>%
+  # Create a numeric index of Month Day combination to sort on
+  mutate(MonthDay.num = as.numeric(paste(Month, Day, sep = ""))) %>%
+  # Create abbreviated month value
+  mutate(Month = month.abb[as.numeric(Month)],
+         Year = as.numeric(Year)) %>%
+  # Create Month day label
+  mutate(MonthDay = paste(Month, ". ", Day, sep = ""))  
+  
+# Summarize the latitudinal range, the corresponding months and days sampled
+# per season, the number of number hauls, the number of individuals estimated
+# per season, the range of lengths measured, the range of ages estimated, 
+# the number of individuals sampled within each haul
+Hauls.N <- area4.summary %>%
+    group_by(tim_stp) %>% # Group Year and Season
+    arrange(MonthDay.num, .by_group = TRUE) %>%
+    mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay)),
+           Absent_hauls = sum(is.na(stndrd_)),
+           Hauls = Hauls, 
+           Latitudes = paste(min(LAT), " - ",  
+                             max(LAT), sep = ""),
+           NbClust = NbClust,
+           Area_range = paste(min(Area_km2), " - ", 
+                              max(Area_km2), sep = "")) %>%
+    ungroup() %>%
+    st_drop_geometry()
+  
+#---------------------------------------------------------------------------
+# If there are presence observations, find length range and create
+# Observation code.
+#---------------------------------------------------------------------------
+  
+# Note that if more than one time.step value exists, it means more than one
+# observation is present!
+Hauls.N.p1 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() == 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(stndrd_, " cm", sep = ""),
+         Ages = paste(age, " yrs", sep = ""),
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p2 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() > 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(min(na.omit(stndrd_)), " - ",
+                         max(na.omit(stndrd_)), 
+                         " cm", sep = ""),
+         Ages = if (n_distinct(age) > 1) {
+           paste(min(na.omit(age)), " - ",
+                 max(na.omit(age)), " yrs")
+           }else{
+             paste(age, " yrs")
+             },
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p <- rbind(Hauls.N.p1, Hauls.N.p2)
+  
+# If there are no presence observations, write absent and create
+# Observation code
+Hauls.N.a <- Hauls.N %>%
+  filter(is.na(stndrd_) & !tim_stp %in% Hauls.N.p$tim_stp) %>%
+  mutate(Lengths = NA,
+         Ages = NA,
+         N = 0, 
+         n = 0)
+  
+# Merge presence absence data tables
+Hauls.N2 <- rbind(Hauls.N.p, Hauls.N.a)
+  
+head(Hauls.N2) 
+sort(unique(Hauls.N2$Year))
+  
+# Create an index
+EntryID <- seq_len(length(unique(Hauls.N2$tim_stp)))
+Year <- as.numeric(substr(unique(Hauls.N2$tim_stp),1,4))
+          
+EntryID.df <- data.frame(EntryID, Year)
+EntryID.df$Year <- EntryID.df$Year
+          
+# Join everything together
+CPS.summary.table <- inner_join(Hauls.N2, EntryID.df)
+CPS.summary.table
+          
+# Group file output with entry id
+dup.survey <- distinct(CPS.summary.table) %>%
+  mutate(Area = "OM Sptl. Area 4")
+
+dup.survey.area4 <- distinct(dup.survey[,c("Area", "EntryID", "Year", "Season", "MonthDay",
+                                           "Hauls", "NbClust", "Area_range", "N",
+                                           "Absent_hauls", "Lengths", "Ages", "n",
+                                           "Latitudes")])
+  
+names(dup.survey.area4) <- c("OM Sptl. Area", "ID", "Year", "Season", "MonthDay", "Hauls",
+                             "Nb. Clusters", "Are Sampled (km2)", "N Est.", 
+                             "Nb. Absent Hauls", "Lengths", "Est. Ages", "n", "Latitudes") 
+
+```
+
+## For Area 5
+
+```{r, sum.over.clusters.area.5}
+
+area5.hauls <- read_sf(paste(dir,"ATM.Survey/Shapefiles/area.transects.shp", sep="")) %>%
+  filter(Area_id == 5)
+
+# View(area5.hauls)
+
+# Sum over like values
+area5.sum.prep <- area5.hauls %>%
+  group_by(tim_stp) %>%
+  # How many hauls are in the area
+  mutate(Hauls = n_distinct(keys)) %>%
+  # How many clusters are in the area
+  mutate(keys2 = paste(date, clstr_g, sep = "-")) %>%
+  mutate(NbClust = n_distinct(keys2)) %>%
+  ungroup() %>%
+  select(-c(collctn, keys, keys2)) %>%
+  group_by(Year, Month, Season, tim_stp, date, clstr_g, Area_id, NbClust, Hauls) %>%
+  summarise(geometry = st_union(geometry)) %>%
+  mutate(Area = st_area(geometry)) %>%
+  ungroup()  
+
+area5.sum <- area5.hauls %>% 
+  # How many hauls are in the area
+  mutate(Hauls = n_distinct(keys)) %>%
+  # How many clusters are in the area
+  group_by(Year, Month, Season, tim_stp, date, clstr_g, Area_id) %>%
+  mutate(keys = paste(date, clstr_g, sep = "-")) %>%
+  ungroup() %>%
+  mutate(NbClust = n_distinct(keys)) %>%
+  select(-c(collctn, keys)) %>%
+  group_by(Year, Month, Season, tim_stp, date, stndrd_, len_bin, clstr_g, Area_id, 
+           age, Hauls) %>%  
+  mutate(Ctch_wt = sum(Ctch_wt),
+         NBRE_IN = sum(NBRE_IN),
+         Total_N = sum(Total_N),
+         CtchWgL = sum(CtchWgL)) %>%
+  ungroup() %>%
+  st_drop_geometry()
+  
+area5.hauls.new <- inner_join(area5.sum.prep, area5.sum)
+
+attributes(area5.hauls.new$Area) = NULL
+
+area5.polygons <- area5.hauls.new %>%
+  mutate(Area_km2 = round(Area/1000, 2))
+
+write_sf(area5.polygons, paste(dir,"ATM.Survey/Shapefiles/area5.polygons.shp",
+                               sep=""))
+
+area5.clst.plot <-
+  ggplot() + 
+  geom_sf(data = area5.polygons, aes(fill = Area), col = "black") +
+  scale_fill_viridis_b()
+
+ggsave2(filename=paste("clstsArea5.jpeg",sep=''), plot=area5.clst.plot,
+        device="jpeg", path=paste(dir,"ATM.Survey/Figures/OMs",sep=""),
+        dpi=1200, width = 29, height=21, unit="cm", limitsize = FALSE)
+
+##------------------------------------------------------------------------------------
+# Create summary table over area extent
+#-------------------------------------------------------------------------------------
+
+area5.summary <- area5.polygons %>% 
+  mutate(Date = as.Date(date)) %>% 
+  # separate out date elements (note the other way would be to rename a vectored list) 
+  separate(Date, into = c("Year", "Month", "Day")) %>%
+  # Create a numeric index of Month Day combination to sort on
+  mutate(MonthDay.num = as.numeric(paste(Month, Day, sep = ""))) %>%
+  # Create abbreviated month value
+  mutate(Month = month.abb[as.numeric(Month)],
+         Year = as.numeric(Year)) %>%
+  # Create Month day label
+  mutate(MonthDay = paste(Month, ". ", Day, sep = ""))  
+  
+# Summarize the latitudinal range, the corresponding months and days sampled
+# per season, the number of number hauls, the number of individuals estimated
+# per season, the range of lengths measured, the range of ages estimated, 
+# the number of individuals sampled within each haul
+Hauls.N <- area5.summary %>%
+    group_by(tim_stp) %>% # Group Year and Season
+    arrange(MonthDay.num, .by_group = TRUE) %>%
+    mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay)),
+           Absent_hauls = sum(is.na(stndrd_)),
+           Hauls = Hauls, 
+           Latitudes = paste(min(LAT), " - ",  
+                             max(LAT), sep = ""),
+           NbClust = NbClust,
+           Area_range = paste(min(Area_km2), " - ", 
+                              max(Area_km2), sep = "")) %>%
+    ungroup() %>%
+    st_drop_geometry()
+  
+#---------------------------------------------------------------------------
+# If there are presence observations, find length range and create
+# Observation code.
+#---------------------------------------------------------------------------
+  
+# Note that if more than one time.step value exists, it means more than one
+# observation is present!
+Hauls.N.p1 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() == 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(stndrd_, " cm", sep = ""),
+         Ages = paste(age, " yrs", sep = ""),
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p2 <- Hauls.N %>% 
+  group_by(tim_stp) %>%
+  filter(n() > 1 & !is.na(stndrd_)) %>%
+  mutate(Lengths = paste(min(na.omit(stndrd_)), " - ",
+                         max(na.omit(stndrd_)), 
+                         " cm", sep = ""),
+         Ages = if (n_distinct(age) > 1) {
+           paste(min(na.omit(age)), " - ",
+                 max(na.omit(age)), " yrs")
+           }else{
+             paste(age, " yrs")
+             },
+         N = sum(Total_N), 
+         n = sum(NBRE_IN)) %>%
+  ungroup()
+  
+Hauls.N.p <- rbind(Hauls.N.p1, Hauls.N.p2)
+  
+# If there are no presence observations, write absent and create
+# Observation code
+Hauls.N.a <- Hauls.N %>%
+  filter(is.na(stndrd_) & !tim_stp %in% Hauls.N.p$tim_stp) %>%
+  mutate(Lengths = NA,
+         Ages = NA,
+         N = 0, 
+         n = 0)
+  
+# Merge presence absence data tables
+Hauls.N2 <- rbind(Hauls.N.p, Hauls.N.a)
+  
+head(Hauls.N2) 
+sort(unique(Hauls.N2$Year))
+
+# Create an index
+EntryID <- seq_len(length(unique(Hauls.N2$tim_stp)))
+Year <- as.numeric(substr(unique(Hauls.N2$tim_stp),1,4))
+          
+EntryID.df <- data.frame(EntryID, Year)
+EntryID.df$Year <- EntryID.df$Year
+          
+# Join everything together
+CPS.summary.table <- inner_join(Hauls.N2, EntryID.df)
+CPS.summary.table
+          
+# Group file output with entry id
+dup.survey <- distinct(CPS.summary.table) %>%
+  mutate(Area = "OM Sptl. Area 5")
+
+dup.survey.area5 <- distinct(dup.survey[,c("Area", "EntryID", "Year", "Season", "MonthDay",
+                                           "Hauls", "NbClust", "Area_range", "N",
+                                           "Absent_hauls", "Lengths", "Ages", "n",
+                                           "Latitudes")])
+  
+names(dup.survey.area5) <- c("OM Sptl. Area", "ID", "Year", "Season", "MonthDay", "Hauls",
+                             "Nb. Clusters", "Are Sampled (km2)", "N Est.", 
+                             "Nb. Absent Hauls", "Lengths", "Est. Ages", "n", "Latitudes") 
+  
+```
+
+# Join summary tables
+
+```{r, join data}
+
+fullsummary.tab <- rbind(dup.survey.area1, dup.survey.area2, dup.survey.area3,
+                         dup.survey.area4, dup.survey.area5)
+
+View(fullsummary.tab)
+
+fwrite(fullsummary.tab, paste(dir,"ATM.Survey/OMs/summaryTable.csv", sep=""), sep=";")
+
+```

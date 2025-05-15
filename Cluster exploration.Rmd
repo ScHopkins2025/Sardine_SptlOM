@@ -1,0 +1,38 @@
+---
+title: "Cluster.exploration"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_knit$set(root.dir = "C:/Users/shopkin1/Documents/")
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "grid", "ggspatial", "ggnewscale", "RColorBrewer", "scales", "rcompanion", "rnaturalearth", "rnaturalearthhires", "r4ss", "patchwork","rmapshaper")
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+sf_use_s2(FALSE)
+
+dir <- "C:/Users/shopkin1/Documents/"
+
+Figure.path <- "Figures/"
+
+```
+
+```{r, check.polygons}
+
+Polygons.2024 <- read_sf(paste(dir, "ATM.Survey/Survey.Data/strata_primary.shp", sep = ""))
+
+plot(Polygons.2024)
+
+```
+
