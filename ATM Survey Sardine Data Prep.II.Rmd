@@ -13,16 +13,14 @@ output:
 rm(list=ls())
 gc()
 
-dir <- getwd()
-
-load.lib <- c("tidyverse", "data.table", "sf", "stars")
+load.lib <- c("tidyverse", "data.table", "sf", "stars", "here")
 
 install.lib <- load.lib[!load.lib %in% installed.packages()]
 
 for(lib in install.lib) install.packages(lib,dependencies=TRUE)
 sapply(load.lib,require,character=TRUE)
 
-dir <- getwd()
+dir <- here(getwd())
 
 survey.path <- "/Survey.Data/"
 
@@ -61,9 +59,16 @@ Note: Note that depending on the species, this can be standard length (SL) or fo
 ```{r, read.haul.data}
 
 # Load catch weight
-LifeHistoryHaulCatch <- fread(paste(dir, survey.path, "CPS_Trawl_LifeHistory_Haulcatch.csv", sep = ""), sep = ",") 
+LifeHistoryHaulCatch <- fread(paste(here(dir), "/Data", survey.path,
+                                    "CPS_Trawl_LifeHistory_Haulcatch.csv", 
+                                    sep = ""), sep = ",") 
 
 str(LifeHistoryHaulCatch)
+
+# Chang time zone to Pacific time
+LifeHistoryHaulCatch <- LifeHistoryHaulCatch %>%
+  mutate(haulback_time = ymd_hms(haulback_time, tz = "America/Los_Angeles"),
+         equilibrium_time = ymd_hms(equilibrium_time, tz = "America/Los_Angeles"))
 
 # Explore data
 length(unique(LifeHistoryHaulCatch$cruise))
@@ -111,9 +116,16 @@ length(unique(LifeHistoryHaulCatch$equilibrium_time))
 ```{r, read.sample.data}
 
 # Load catch samples used to estimate length frequency distribution
-LifeHistorySpecimen <- fread(paste(dir, survey.path, "CPS_Trawl_LifeHistory_Specimen.csv", sep = ""), sep = ",")
+LifeHistorySpecimen <- fread(paste(here(dir), "/Data", survey.path,
+                                   "CPS_Trawl_LifeHistory_Specimen.csv", sep = ""), 
+                             sep = ",")
 
 str(LifeHistorySpecimen)
+
+# Chang time zone to Pacific time
+LifeHistorySpecimen <- LifeHistorySpecimen %>%
+  mutate(equilibrium_time = ymd_hms(time, tz = "America/Los_Angeles")) %>%
+  select(-time)
 
 # Check the summary statistics for sardine
 test.sardine <- LifeHistorySpecimen %>%
@@ -139,7 +151,7 @@ length(unique(test.sardine2$collection))
 colnames(LifeHistorySpecimen) %in% colnames(LifeHistoryHaulCatch)
 
 # View names of column ids
-joinKeys <- LifeHistorySpecimen %>% select(c(1:4,8:9)) %>% names()
+joinKeys <- LifeHistorySpecimen %>% select(c(1:4,7:8,17)) %>% names()
 
 # Join data sets by column ids and calculate haul expansion factor (factor_h)
 CatchWeightLengthPerHaul <- left_join(LifeHistorySpecimen, LifeHistoryHaulCatch, by = joinKeys)  %>% distinct()
@@ -148,36 +160,32 @@ summary(CatchWeightLengthPerHaul)
 
 # Check column names
 colnames(CatchWeightLengthPerHaul)
-#  [1] "cruise"                 "ship"                   "haul"                   "collection"          
-#  [5] "latitude"               "longitude"              "time"                   "itis_tsn"            
-#  [9] "scientific_name"        "specimen_number"        "sex"                    "is_random_sample"    
-# [13] "weight"                 "standard_length"        "fork_length"            "total_length"        
-# [17] "mantle_length"          "start_latitude"         "start_longitude"        "stop_latitude"       
-# [21] "stop_longitude"         "equilibrium_time"       "haulback_time"          "surface_temp"        
-# [25] "surface_temp_method"    "ship_spd_through_water" "subsample_count"        "subsample_weight"    
-# [29] "remaining_weight"       "presence_only"          "beginTransect"          "endTransect"           
+#  [1] "cruise"                 "ship"                   "haul"                  
+#  [4] "collection"             "latitude"               "longitude"             
+#  [7] "itis_tsn"               "scientific_name"        "specimen_number"       
+# [10] "sex"                    "is_random_sample"       "weight"                
+# [13] "standard_length"        "fork_length"            "total_length"          
+# [16] "mantle_length"          "equilibrium_time"       "start_latitude"        
+# [19] "start_longitude"        "stop_latitude"          "stop_longitude"        
+# [22] "haulback_time"          "surface_temp"           "surface_temp_method"   
+# [25] "ship_spd_through_water" "subsample_count"        "subsample_weight"      
+# [28] "remaining_weight"       "presence_only"          "beginTransect"         
+# [31] "endTransect"     
 
 # Identify which columns are in the specimen table, but not the haul table
 !colnames(LifeHistorySpecimen) %in% colnames(LifeHistoryHaulCatch)
 
 # Pull the numes of the columns not in the haul table
-new.cols <- LifeHistorySpecimen %>% select(c(5:7,10:17)) %>% names()
-#  [1] "latitude"         "longitude"        "time"             "specimen_number"  "sex"             
-#  [6] "is_random_sample" "weight"           "standard_length"  "fork_length"      "total_length"    
-# [11] "mantle_length"     
+new.cols <- LifeHistorySpecimen %>% select(c(5:6,9:16)) %>% names()
+# [1] "latitude"         "longitude"        "specimen_number"  "sex"             
+# [5] "is_random_sample" "weight"           "standard_length"  "fork_length"     
+# [9] "total_length"     "mantle_length"   
 
-# To calculate the proportion of species in a trawl cluster, it is first necessary to calculate a few
-# individual parameters using random samples.
+# To calculate the proportion of species in a trawl cluster, it is first necessary to calculate a few individual parameters using random samples.
 
 # View the random sample notations
 unique(CatchWeightLengthPerHaul$is_random_sample)
 # [1] "Y" "N" NA  "y" "n"
-
-# See if time is the same as equilibrium time between the two tables
-identical(CatchWeightLengthPerHaul$time, CatchWeightLengthPerHaul$equilibrium_time)
-
-# Remove "time" column, this is the same as equilibrium_time
-CatchWeightLengthPerHaul <- CatchWeightLengthPerHaul[,-7]
 
 ```
 
@@ -211,13 +219,14 @@ summary(CatchWeightLengthPerHaul)
 
 # For Sardine
 Haul.weights.sar <- CatchWeightLengthPerHaul %>%
-   # Isolate only sardine
+  # Isolate only sardine
   filter(scientific_name == "Sardinops sagax") %>%
   # Group by transect
   group_by(collection) %>% 
   # Sum the sampled and unsampled species weight to get total species weight
   mutate(Species_weight = subsample_weight+remaining_weight,
-         weight = weight/1000) %>% # Convert g to kg.
+         # Convert g to kg
+         weight = weight/1000) %>% 
   ungroup()
 
 summary(Haul.weights.sar)
@@ -225,13 +234,20 @@ summary(Haul.weights.sar)
 
 # For Other species
 Haul.weights.oth <- CatchWeightLengthPerHaul %>%
-  filter(scientific_name != "Sardinops sagax") %>% # All but sardine
-  group_by(collection) %>% # Group by transect
-  mutate(Species_weight = 0,      # Set to zero because we only want this as a place holder
-         weight = 0,              # Set to zero because we only want this as a place holder
-         subsample_weight = 0,    # Set to zero because we only want this as a place holder
-         specimen_number = 0,     # Set to zero because we only want this as a place holder
-         subsample_count = 0) %>% # Set to zero because we only want this as a place holder
+  # All but sardine
+  filter(scientific_name != "Sardinops sagax") %>% 
+  # Group by transect
+  group_by(collection) %>% 
+  mutate(# Set to zero because we only want this as a place holder
+         Species_weight = 0, 
+         # Set to zero because we only want this as a place holder
+         weight = 0,
+         # Set to zero because we only want this as a place holder
+         subsample_weight = 0,
+         # Set to zero because we only want this as a place holder
+         specimen_number = 0,
+         # Set to zero because we only want this as a place holder
+         subsample_count = 0) %>% 
   ungroup()
 
 summary(Haul.weights.oth)
@@ -273,12 +289,13 @@ length(unique(check1$collection))
 
 # Re-order columns for easier comparison
 Haul.weights <- 
-  Haul.weights[,c("scientific_name","quality.indic","FID","subsample_count","specimen_number",
-                  "subsample_weight","remaining_weight","weight","cruise","ship","haul",
-                  "collection","latitude","longitude","itis_tsn","sex","is_random_sample",
-                  "standard_length","fork_length","total_length","mantle_length","start_latitude",
-                  "start_longitude","stop_latitude","stop_longitude","equilibrium_time",
-                  "haulback_time","surface_temp","surface_temp_method","ship_spd_through_water",
+  Haul.weights[,c("scientific_name","quality.indic","FID","subsample_count",
+                  "specimen_number","subsample_weight","remaining_weight","weight",
+                  "cruise","ship","haul","collection","latitude","longitude",
+                  "itis_tsn","sex","is_random_sample","standard_length","fork_length",
+                  "total_length","mantle_length","start_latitude","start_longitude",
+                  "stop_latitude","stop_longitude","equilibrium_time","haulback_time",
+                  "surface_temp","surface_temp_method","ship_spd_through_water",
                   "presence_only","beginTransect","endTransect")]
 
 ```
@@ -316,26 +333,30 @@ dim(check2)
 # [1] 954  33
 
 range(check2$equilibrium_time)
-# [1] "2003-07-12 08:52:00 UTC" "2024-08-03 10:27:00 UTC"
+# [1] "2003-07-12 08:52:00 PDT" "2024-08-03 10:27:00 PDT"
 
 # View(check2)
 
 Haul.weights %>%
   group_by(collection) %>%
-  filter(specimen_number > subsample_count) %>% # Remove individuals exceeding the total sample count
+  # Remove individuals exceeding the total sample count
+  filter(specimen_number > subsample_count) %>% 
   mutate(quality.indic2 = round(sum(weight)-subsample_weight, 3)) %>%
   ungroup() %>%
   filter(quality.indic2 != 0) %>%
-  fwrite(., "C:/Users/shopkin1/Documents/ATM.Survey/extra.sample.observation.errors.csv", sep = ",")
+  fwrite(., paste(here(dir), "/Data", survey.path,
+                  "ATM.Survey.extra.sample.observation.errors.csv", sep = ""),
+       sep = ",")
 
-#------------------------------------------------------------------------------------------
+#----------------------------------------------------------------------------------------
 # Filter out specimens with exceed reported value 
 #-------------------------------------------------
 
 Haul.weights.rev <- Haul.weights %>%
   filter(quality.indic !=0) %>%
   group_by(collection) %>%
-  filter(specimen_number <= subsample_count) %>% # Remove individuals exceeding the total sample count
+  # Remove individuals exceeding the total sample count
+  filter(specimen_number <= subsample_count) %>% 
   mutate(quality.indic2 = round(sum(weight)-subsample_weight, 3)) %>%
   ungroup() %>%
   distinct()
@@ -349,9 +370,9 @@ dim(Haul.weights.rev)
 # [1] 4192  34
 
 range(Haul.weights.rev$equilibrium_time)
-# [1] "2003-07-10 07:36:00 UTC" "2024-08-03 10:27:00 UTC"
+# [1] "2003-07-10 07:36:00 PDT" "2024-08-03 10:27:00 PDT"
 
-#------------------------------------------------------------------------------------------
+#----------------------------------------------------------------------------------------
 # See how many mismatches still exit 
 #-----------------------------------
 
@@ -365,7 +386,7 @@ dim(test.rev)
 # [1] 940  34
 
 range(test.rev$equilibrium_time)
-# [1] "2003-07-10 07:36:00 UTC" "2019-06-30 05:55:00 UTC"
+# [1] "2003-07-10 07:36:00 PDT" "2019-06-30 05:55:00 PDT"
 
 ```
 
@@ -391,7 +412,8 @@ For example, there is one cruise where there is a missing specimen weight or the
 
 check3 <- Haul.weights.rev %>%
   group_by(collection) %>%
-  filter(max(specimen_number) < unique(subsample_count)) %>% # Check collections with missing data points
+  # Check collections with missing data points
+  filter(max(specimen_number) < unique(subsample_count)) %>% 
   ungroup()
 
 length(unique(check3$collection))
@@ -401,7 +423,7 @@ dim(check3)
 # [1] 47  34
 
 range(check3$equilibrium_time)
-# [1] "2004-03-17 12:37:00 UTC" "2004-03-17 12:37:00 UTC"
+# [1] "2004-03-17 12:37:00 PST" "2004-03-17 12:37:00 PST"
 
 #-----------------------------------------------------------------
 # Save output based on identified collections
@@ -418,7 +440,10 @@ unique(check3.1$is_random_sample)
 unique(check3.1$presence_only)
 # [1] "N"
 
-fwrite(check3.1, "C:/Users/shopkin1/Documents/ATM.Survey/missing.entry.error.csv", sep = ",")
+fwrite(check3.1, paste(here(dir), "/Data", survey.path,
+                       "ATM.Survey.missing.entry.error.csv", 
+                       sep = ""), 
+       sep = ",")
 
 ```
 
@@ -455,7 +480,7 @@ dim(Haul.weights.rev.1.1)
 # [1] 50 34
 
 range(Haul.weights.rev.1.1$equilibrium_time)
-# [1] "2003-07-20 11:13:00 UTC" "2003-07-20 11:13:00 UTC"
+# [1] "2003-07-20 11:13:00 PDT" "2003-07-20 11:13:00 PDT"
 
 #-------------------------------------------------------
 # Check shift in two decimal places to the left
@@ -510,7 +535,10 @@ length(unique(Haul.weights.rev.3.1$collection))
 # View(Haul.weights.rev.1.1)
 
 # Only one entry had a magnitude error with a shift in 1 decimal place to the left
-fwrite(Haul.weights.rev.1.1, "C:/Users/shopkin1/Documents/ATM.Survey/magnitude.observation.error.csv", sep = ",")
+fwrite(Haul.weights.rev.1.1, paste(here(dir), "/Data", survey.path,
+                                   "ATM.Survey.magnitude.observation.error.csv", 
+                                   sep = ""), 
+       sep = ",")
 
 ```
 
@@ -522,13 +550,14 @@ The goal here is to have a quality indicator of 0, check that the updates has at
 
 Haul.weights.rev2 <- Haul.weights.rev %>%
   group_by(collection) %>%
-  filter(!collection %in% Haul.weights.rev.1.1$collection & !collection %in% check3.1$collection) %>%
+  filter(!collection %in% Haul.weights.rev.1.1$collection &
+           !collection %in% check3.1$collection) %>%
   # Remove entries where we have adjusted the magnitude and where missing data is present
   ungroup()
 
 unique(Haul.weights.rev2$quality.indic2)
-#  [1] -0.092  0.000  0.006 -0.003 -0.002 -0.050  0.037 -0.005  4.135  1.395 -0.020  0.001  0.072
-# [14] -0.155  0.003 -0.030  0.100
+#  [1] -0.092  0.000  0.006 -0.003 -0.002 -0.050  0.037 -0.005  4.135  1.395 -0.020
+# [12]  0.001  0.072 -0.155  0.003 -0.030  0.100
 
 #---------------------------------------------------------------
 # Redistribute weight based on proportion of weight by length
@@ -548,7 +577,7 @@ dim(precision.error)
 # [1] 843  35
 
 range(precision.error$equilibrium_time)
-# [1] "2003-07-10 07:36:00 UTC" "2019-06-30 05:55:00 UTC"
+# [1] "2003-07-10 07:36:00 PDT" "2019-06-30 05:55:00 PDT"
 
 # View(precision.error)
 
@@ -583,7 +612,9 @@ check4.1 <- check4 %>%
 
 # View(check4.1)
 
-fwrite(precision.error, "C:/Users/shopkin1/Documents/ATM.Survey/unsolved.error.csv", sep = ",")
+fwrite(precision.error, paste(here(dir), "/Data", survey.path,
+                              "ATM.unsolved.error.csv", sep = ""),
+       sep = ",")
 
 ```
 
@@ -738,7 +769,10 @@ missing.coll <- Haul.weights %>%
 
 # View(missing.coll)
 
-fwrite(Cleaned.data, "C:/Users/shopkin1/Documents/ATM.Survey/2003.2024.ATM.Survey.csv", sep = ",")
+fwrite(Cleaned.data, paste(here(dir), "/Data", survey.path,
+                           "2003.2024.ATM.Survey.csv", 
+                           sep = ""), 
+       sep = ",")
 
 ```
 
