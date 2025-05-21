@@ -33,7 +33,7 @@ Figure.path <- "Figures/"
 
 ```{r, area2}
 
-area2.poly <- read_sf(paste(dir, "Data/area2.polygons.shp", sep = ""))
+area2.poly <- read_sf(paste(dir, "/Data/area2.polygons.shp", sep = ""))
 
 plot(area2.poly)
 
@@ -60,6 +60,9 @@ area2poly.dens <- area2.poly %>%
 
 View(area2poly.dens)
 
+plotNormalHistogram(area2poly.dens$CtchWgL)
+range(area2poly.dens$CtchWgL)
+
 ```
 
 # Fit initial sdmTMB
@@ -77,68 +80,77 @@ centroids <-  area2poly.dens %>%
 
 plot(centroids$X, centroids$Y)  
 
+centroids.t <- centroids %>%
+  mutate(X = X/1000, Y = Y/1000)
+
+plot(centroids.t$X, centroids.t$Y) 
+
 # Get summary table for nearest neighbor
 library(spatstat)
-coords <- cbind(centroids$X, centroids$Y)
+coords <- cbind(centroids.t$X, centroids.t$Y)
 nn_dist <- nndist(coords)
 summary(nn_dist)
 
-# Set cuttoff to 2/3 distance (mean or median - choose median if strong outliers)
+# Set cut-toff to 2/3 distance (mean or median - choose median if strong out-liers)
 ## This is informed by the SPDE theory about mesh resolution relative to spatial 
 ## range (from Lindgren et al. 2011 and related papers) -- to verify against ChatGPT
 
-cutoff <- 5972.9*(2/3)
+cutoff <- 5.9729*(2/3)
 cutoff
 
-# 500 m
-mesh005 <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 500)
+# 4km
+mesh04 <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 4)
 plot(mesh005)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
 # 1 km
-mesh01 <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 1000)
+mesh01 <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 1)
 plot(mesh01)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
 # 2 km
-mesh02 <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 2000) 
+mesh02 <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 2) 
 plot(mesh02)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
+
+# 3 km
+mesh03 <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 3)
+plot(mesh05)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
 # 5 km
-mesh05 <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 5000)
+mesh05 <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 5)  
 plot(mesh05)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
-# 10 km
-mesh10 <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 10000)  
-plot(mesh10)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+```
 
+
+```{r, area2.mesh}
 # 15 km
-mesh15 <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 15000)  
+mesh15 <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 15000)  
 plot(mesh15)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
 # 20 km
-mesh20 <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 20000)  
+mesh20 <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 20000)  
 plot(mesh20)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
 # 25 km
-mesh25 <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 25000)
+mesh25 <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 25000)
 plot(mesh25)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
 # 2/3 median nearest neighbor distance
-mesh.median <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = cutoff)  
+mesh.median <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = cutoff)  
 plot(mesh.median)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
 # round to nearest km from 2/3 median nearest neighbor distance
-mesh.median.mod <- make_mesh(centroids, xy_cols = c("X", "Y"), cutoff = 4000)  
+mesh.median.mod <- make_mesh(centroids.t, xy_cols = c("X", "Y"), cutoff = 4000)  
 plot(mesh.median.mod)
-points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
+points(centroids.t$X, centroids.t$Y, col = "red", pch = 19, cex = 0.1)
 
 ```
 
@@ -146,7 +158,7 @@ points(centroids$X, centroids$Y, col = "red", pch = 19, cex = 0.1)
 
 # 4km mesh and Year/Month
 m1 <- sdmTMB(
-    data = centroids,
+    data = centroids.t,
     formula = Density ~ 1,
     mesh = mesh.median.mod,
     family = tweedie(link = "log"),
@@ -193,7 +205,7 @@ nlminb_loops
 
 # 4km mesh and Year/Month
 m2 <- sdmTMB(
-    data = centroids,
+    data = centroids.t,
     formula = Density ~ 1,
     mesh = mesh.median.mod,
     family = tweedie(link = "log"),
@@ -210,7 +222,7 @@ m2 <- sdmTMB(
 ```{r}
 # 4km mesh and Year/Season
 m2 <- sdmTMB(
-    data = centroids,
+    data = centroids.t,
     formula = Density ~ 1, k = 5,
     mesh = mesh.median.mod,
     family = tweedie(link = "log"),
@@ -224,7 +236,7 @@ sanity(m2)
 
 # 10km mesh & Year/Month
 m3 <- sdmTMB(
-    data = centroids,
+    data = centroids.t,
     formula = Density ~ 1,
     mesh = mesh10,
     family = tweedie(link = "log"),
