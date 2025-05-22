@@ -945,7 +945,7 @@ area.transects.buff <- st_buffer(area.transects.final, 100)
 # View(area.transects.buff)
 
 # Where to save output
-bufferTrans.dir <- here(getwd(), "Shapefiles")
+bufferTrans.dir <- here(getwd(), "Data", "Shapefiles")
 
 # Save shapefile
 write_sf(area.transects.buff, 
