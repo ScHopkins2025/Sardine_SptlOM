@@ -1,0 +1,53 @@
+---
+title: "BuildSdmTMB.adapted.from.Barb"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    
+---
+
+```{r setup, include=FALSE}
+
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "Visreg", 
+              "geodata", # To get coastlines 
+              "pROC", "here", "sdmTMB","sdmTMBextra", # for adding barrier mesh
+              "ggforce" # enables plot_anisotropy
+              )
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+sf_use_s2(FALSE)
+
+remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
+
+dir <- here(getwd())
+
+```
+
+# Load previous sdm data
+
+Build new adult sardine SDM using environmental predictors from the 3km WC15 ROMS.
+Vars are SST, surface chl-a, upper 50m zooplankton biomass, SSB. 
+Chl-a didn't improve AUC, dropped for now.
+
+```{r, load.previous.dat}
+
+# Where previous data is stored
+sdmDir <- here(wd(), "Previous.sdmTMB.Data")
+
+# Load data
+dat <- readRDS(paste(sdmDir, "/sardineTrainingData.rds", sep = ""))
+
+# Project data
+dat2 <- dat
+
+```
+

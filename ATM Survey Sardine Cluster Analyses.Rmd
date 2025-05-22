@@ -1,5 +1,5 @@
 ---
-title: "ATM Survey Sardine Maps"
+title: "ATM Survey Sardine Cluster Analyses"
 author: "Stephanie Hopkins"
 date: "`r Sys.Date()`"
 output: 
