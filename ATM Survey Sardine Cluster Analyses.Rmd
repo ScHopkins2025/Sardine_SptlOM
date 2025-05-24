@@ -42,6 +42,9 @@ full.series <- fread(paste(here(dir), "/Data", survey.path,
   # convert mm to cm to be able to use VBGF
   mutate(standard_length = standard_length/10) 
 
+length(unique(full.series$collection))
+# [1] 1891
+
 ```
 
 # Mean of the haul geometry
@@ -59,7 +62,7 @@ range(full.series$start_latitude)
 Lat1 <- full.series$start_latitude
 
 mean(full.series$start_latitude)
-# [1] -122.6376
+# [1] 39.513
 
 range(full.series$start_longitude)
 # [1] -132.7302 -114.7928
@@ -134,23 +137,25 @@ Note that for initial plots, CPUE was defined as kg/hr, but since we are estimat
 ```{r, calculate.fishing.duration}
 
 full.series.sf <- trip_rect %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry) %>%
-  mutate(haulback_time = strptime(haulback_time, "%Y-%m-%d %H:%M:%S"),
-         equilibrium_time = strptime(equilibrium_time, "%Y-%m-%d %H:%M:%S")) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
+  mutate(haulback_time.pacific = 
+           strptime(haulback_time.pacific, "%Y-%m-%d %H:%M:%S"),
+         equilibrium_time.pacific = 
+           strptime(equilibrium_time.pacific, "%Y-%m-%d %H:%M:%S")) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry) %>%
-  mutate(haulback_t = as.numeric(format(haulback_time, "%H")) + 
-           as.numeric(format(haulback_time, "%M"))/60,
-         equilibrium_t = as.numeric(format(equilibrium_time, "%H")) + 
-           as.numeric(format(equilibrium_time, "%M"))/60) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
+  mutate(haulback_t = as.numeric(format(haulback_time.pacific, "%H")) + 
+           as.numeric(format(haulback_time.pacific, "%M"))/60,
+         equilibrium_t = as.numeric(format(equilibrium_time.pacific, "%H")) + 
+           as.numeric(format(equilibrium_time.pacific, "%M"))/60) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
   mutate(duration = (haulback_t - equilibrium_t)) %>%
   ungroup()
 
-head(unique(full.series.sf$haulback_time))
+head(unique(full.series.sf$haulback_time.pacific))
 head(unique(full.series.sf$haulback_t))
-head(unique(full.series.sf$equilibrium_time))
+head(unique(full.series.sf$equilibrium_time.pacific))
 head(unique(full.series.sf$equilibrium_t))
 head(unique(full.series.sf$duration))
   
@@ -166,14 +171,14 @@ Note that here we are standardizing and correcting the data to remove noise and 
 # (checked in data prep code)
 Sardine <- full.series.sf %>% 
   filter(scientific_name == "Sardinops sagax") %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, 
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, 
            duration, LAT, LON) %>%
   # Sum over the number of sampled weights and find the total weight of the catch 
   mutate(Total_N = sum(subsample_count), 
          Total_W = sum(subsample_weight+remaining_weight)) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, standard_length,
-           Total_N, Total_W, duration, LAT, LON) %>% 
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry,
+           standard_length, Total_N, Total_W, duration, LAT, LON) %>% 
   # Remove entries where there are no length observations and sum sampled number and
   # weight
   filter(!is.na(standard_length)) %>%
@@ -181,25 +186,25 @@ Sardine <- full.series.sf %>%
             WGHT_IN = sum(as.numeric(weight)),
             .groups = "keep") %>%
   ungroup() %>% 
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, 
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, 
            duration, LAT, LON) %>% 
   # Determine portion of lengths represented in the catch and find the mean weight at
   # length
   mutate(PropLen = NBRE_IN/Total_N, 
          TheoreticalWgt_i = (7.52e-06*((standard_length)^3.23))) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, 
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, 
            duration, LAT, LON) %>%
   # Take the proportion of the mean weight at length in the catch 
   mutate(EstimatedWeight = sum(PropLen*TheoreticalWgt_i)*Total_N) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, Total_N,
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, Total_N,
            duration, LAT, LON) %>%
   #  Adjust the total weight (sampled + unsampled weight) based on the proportion of
   # mean weight at length
   mutate(Correction.factor = sum(Total_W)/EstimatedWeight) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, Total_N,
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, Total_N,
            duration, LAT, LON) %>%
   # Multiple the proportion of lengths represented in the catch by the adjusted
   # proportion of weight represented by length
@@ -228,12 +233,12 @@ summary(distinct(Sardine))
 sum(Sardine$NBRE_IN)
 # [1] 775645
 
-Sardine$equilibrium_time <- as.factor(Sardine$equilibrium_time)
+Sardine$equilibrium_time.pacific <- as.factor(Sardine$equilibrium_time.pacific)
 
 plotNormalHistogram(Sardine$standard_length)
 
 ggplot(data = na.omit(Sardine), aes(x=standard_length, y=PropLen, 
-                                    col=equilibrium_time)) +
+                                    col=equilibrium_time.pacific)) +
   geom_bar(stat = "identity", position = "stack") +
   theme(legend.position="none") 
 
@@ -334,7 +339,7 @@ Use the values extracted from the ss model for pacific sardine
 
 # Apply VBGF
 Sardine2 <- Sardine %>%
-  group_by(cruise, ship, haul, equilibrium_time, collection, geometry, duration) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, duration) %>%
   mutate(age = round((-1/K)*log(1-(standard_length/Linf)) + A_a_L0)) %>% 
   ungroup() %>%
   group_by(age) %>%
@@ -380,8 +385,7 @@ Because aging is uncertain, propose length bins where the first 100mm are groupe
 
 ```{r, length.bin.defs}
 
-len.bins <- Sardine2 %>%
-  filter(collection != 2734) 
+len.bins <- Sardine2
 
 head(len.bins)
 
@@ -486,12 +490,11 @@ len100.0s <- len100 %>%
 
 len100.new <- rbind(len100.negs,  len100.0s)
 
-
 #-------------------------------------------------------------------------------
 # Join data sets 
 #-------------------------------------------------------------------------------
 
-len.bins2 <- rbind(len100.new, len125, len150, len175, len200, len225, len250)
+len.bins2 <- rbind(len100.new, len125, len150, len175, len200, len225, len250, len250plus)
 
 #-------------------------------------------------------------------------------
 # Re-code Sardines NaNs and to 13+ ages to 10+
@@ -519,34 +522,33 @@ This is the same procedure as above, only in place of age we now have length bin
 ```{r, length.bin.cpues}
 
 len.bins3 <- len.bins2 %>%
-  mutate(equilibrium_time = as.POSIXct(equilibrium_time, 
-                                       format = "%Y-%m-%d %H:%M:%S")) %>%
-  group_by(cruise, ship, haul, equilibrium_time, len.bin, duration, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, len.bin, duration, geometry) %>%
   mutate(Catch.wt = sum(CatchWeightLen)) %>%
-  mutate(CPUE.trp = log1p(Catch.wt / as.numeric(duration))) %>%
+  mutate(log1p.CPUE.trp = log1p(Catch.wt / as.numeric(duration))) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, len.bin, geometry) %>%
-  mutate(Year = as.numeric(substr(equilibrium_time,1,4)),
-         Month = as.numeric(substr(equilibrium_time,6,7))) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, len.bin, geometry) %>%
+  mutate(Year = as.numeric(substr(equilibrium_time.pacific,1,4)),
+         Month = as.numeric(substr(equilibrium_time.pacific,6,7))) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, len.bin, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, len.bin, geometry) %>%
   mutate(Season =
-           case_when(Month %in% c(3:5) ~"Spring",  
-                     Month %in% c(6:11) ~"Summer")) %>%
+           case_when(Month %in% c(3:5) ~ "Spring",  
+                     Month %in% c(6:8) ~ "Summer",
+                     Month %in% c(9:11) ~ "Fall")) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, len.bin, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, len.bin, geometry) %>%
   mutate(time.step = paste(Year," - ", Season, sep="")) %>%
   ungroup() %>%
-  select(collection, age, len.bin, Catch.wt, CPUE.trp, Year, Month, Season, time.step,
-         geometry, equilibrium_time, standard_length, NBRE_IN, Total_N, LON, LAT,
+  select(collection, age, len.bin, Catch.wt, log1p.CPUE.trp, Year, Month, Season, time.step,
+         geometry, equilibrium_time.pacific, standard_length, NBRE_IN, Total_N, LON, LAT,
          CatchWeightLen) %>%
   mutate(keys = paste(collection, Year, Month, Season, geometry, time.step,
-                      equilibrium_time, sep="")) %>%
+                      equilibrium_time.pacific, sep="")) %>%
   distinct()
 
 # Find min and max values for plots
-lim.max <- max(len.bins3$CPUE.trp)
-lim.min <- min(len.bins3$CPUE.trp)
+lim.max <- max(len.bins3$log1p.CPUE.trp)
+lim.min <- min(len.bins3$log1p.CPUE.trp)
 
 # View(len.bins3)
 
@@ -559,9 +561,9 @@ lim.min <- min(len.bins3$CPUE.trp)
 Others <- full.series.sf %>% 
   filter(scientific_name != "Sardinops sagax") %>%
   mutate(scientific_name = "Other")  %>%
-  group_by(cruise, ship, haul, equilibrium_time, duration, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, duration, geometry) %>%
   mutate(Catch.wt = 0, 
-         CPUE.trp = 0, 
+         log1p.CPUE.trp = 0, 
          len.bin = NA, 
          standard_length = NA, 
          NBRE_IN = 0, 
@@ -569,24 +571,25 @@ Others <- full.series.sf %>%
          CatchWeightLen = 0,
          age = NA) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, geometry) %>%
-  mutate(Year = as.numeric(substr(equilibrium_time,1,4)),
-         Month = as.numeric(substr(equilibrium_time,6,7))) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, geometry) %>%
+  mutate(Year = as.numeric(substr(equilibrium_time.pacific,1,4)),
+         Month = as.numeric(substr(equilibrium_time.pacific,6,7))) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, geometry) %>%
   mutate(Season =
-           case_when(Month %in% c(3:5) ~"Spring",  
-                     Month %in% c(6:11) ~"Summer")) %>%
+           case_when(Month %in% c(3:5) ~ "Spring",  
+                     Month %in% c(6:8) ~ "Summer",
+                     Month %in% c(9:11) ~ "Fall")) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, geometry) %>%
   mutate(time.step = paste(Year," - ", Season, sep="")) %>%
   ungroup() %>%
   st_transform(.,crs = 4326) %>%
-  select(collection, age, len.bin, Catch.wt, CPUE.trp, Year, Month, Season, time.step,
-         geometry, equilibrium_time, standard_length, NBRE_IN, Total_N, LON, LAT,
+  select(collection, age, len.bin, Catch.wt, log1p.CPUE.trp, Year, Month, Season, time.step,
+         geometry, equilibrium_time.pacific, standard_length, NBRE_IN, Total_N, LON, LAT,
          CatchWeightLen) %>%
   mutate(keys = paste(collection, Year, Month, Season, geometry, time.step,
-                      equilibrium_time, sep="")) %>%
+                      equilibrium_time.pacific, sep="")) %>%
   distinct()
 
 ```
@@ -604,7 +607,7 @@ Absent <- Others %>%
 # View(Absent)
 
 PreAbs <- rbind(len.bins3, Absent)  %>%
-  mutate(date = as.Date(equilibrium_time))
+  mutate(date = as.Date(equilibrium_time.pacific))
 # View(PreAbs)
 
 fwrite(PreAbs, paste(here(dir), "/Data", survey.path,
@@ -877,7 +880,7 @@ suntimes <- PreAbs %>%
   transmute(
     lat = LAT,
     lon = LON,
-    date = as.Date(equilibrium_time)
+    date = as.Date(equilibrium_time.pacific)
   ) %>%
   distinct() %>%
   st_drop_geometry()
@@ -901,7 +904,7 @@ fwrite(sun_times, file = paste(sun_times.dir, "/sunrise_sunset_times.csv",
 
 Note that you the code above returns an IDate column for date and needs converted to standard date.
 
-```{r}
+```{r, join.sunrise.set.and.dat}
 
 # Check output
 sun_times <- fread(file = paste(sun_times.dir, "/sunrise_sunset_times.csv",
@@ -912,15 +915,15 @@ sun_times <- fread(file = paste(sun_times.dir, "/sunrise_sunset_times.csv",
   select(-c(lat,lon))
 
 # Add sun_times to original data set
-area.transects <- inner_join(PreAbs, sun_times, by = c("date", "LAT", "LON")) %>%
+area.transects <- left_join(PreAbs, sun_times, by = c("date", "LAT", "LON")) %>%
   st_transform(., crs = 5070)
-# View(area.transects)  
+View(area.transects)  
 
 # Filter hauls that are taken before 
 # sunset time that are after sunrise time
 area.transects.d <- area.transects %>%
   group_by(date) %>%
-  filter(equilibrium_time >= sunrise_pacific) %>%
+  filter(equilibrium_time.pacific >= sunrise_pacific) %>%
   mutate(cluster.grp = "dayTrawl") %>%
   ungroup()
   
@@ -928,15 +931,15 @@ area.transects.d <- area.transects %>%
 # sunrise time that are after sunset time
 area.transects.n <- area.transects %>%
   group_by(date) %>%
-  filter(equilibrium_time < sunrise_pacific |
-           equilibrium_time >= sunset_pacific) %>%
+  filter(equilibrium_time.pacific < sunrise_pacific |
+           equilibrium_time.pacific >= sunset_pacific) %>%
   mutate(cluster.grp = "nghtTrawl") %>%
   ungroup()
   
 # Join spatial objects and convert DateTime values to character 
 # string (ESIRI does not work with DateTime)
 area.transects.final <- rbind(area.transects.d, area.transects.n) %>%
-  mutate(equilibrium_time = as.character(equilibrium_time),
+  mutate(equilibrium_time.pacific = as.character(equilibrium_time.pacific),
          sunrise_pacific = as.character(sunrise_pacific),
          sunset_pacific = as.character(sunset_pacific))
 
@@ -955,13 +958,14 @@ write_sf(area.transects.buff,
 
 ## Sum clusters
 
-```{r}
+```{r, group.hauls.by.cluster}
+
 # Load data
 area.transects.buff <- read_sf(paste(bufferTrans.dir, "/buffer.transects.shp", sep = ""))
 
 colnames(area.transects.buff)
-#  [1] "collctn"  "age"      "len_bin"  "Ctch_wt"  "CPUE_tr"  "Year"     "Month"   
-#  [8] "Season"   "tim_stp"  "eqlbrm_"  "stndrd_"  "NBRE_IN"  "Total_N"  "LON"     
+#  [1] "collctn"  "age"      "len_bin"  "Ctch_wt"  "l1_CPUE"  "Year"     "Month"   
+#  [8] "Season"   "tim_stp"  "eqlbr__"  "stndrd_"  "NBRE_IN"  "Total_N"  "LON"     
 # [15] "LAT"      "CtchWgL"  "keys"     "date"     "snrs_pc"  "snst_pc"  "clstr_g" 
 # [22] "geometry"
 
@@ -1041,7 +1045,7 @@ Hauls.N <- areaTranBuff.polygons.summary %>%
     arrange(MonthDay.num, .by_group = TRUE) %>%
     mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay)),
            Absent_hauls = sum(is.na(stndrd_)),
-           Hauls = Hauls, 
+           Hauls = sum(Hauls), 
            Latitudes = paste(format(round(min(LAT), 2), nsmall = 2), # 2 digits after
                              " - ",  
                              format(round(max(LAT), 2), nsmall = 2), sep = ""),

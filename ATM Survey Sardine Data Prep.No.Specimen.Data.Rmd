@@ -1,0 +1,297 @@
+---
+title: "ATM Survey Sardine Data Prep"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    
+---
+
+```{r setup, include=FALSE}
+
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "sf", "stars", "here")
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+dir <- here(getwd())
+
+survey.path <- "/Survey.Data/"
+
+```
+
+# Load unmatched original and cleaned data
+
+Recall the originally was 2676 collections. But when running the aggregations, only 1896 were present. Explore what to do with these 779 entries without a corresponding specimen table entry.
+
+```{r, load.data.sets}
+
+unmatched.data <- fread(paste(here(dir), "/Data", survey.path,
+                              "ATM.Survey.no.corresponding.specimen.table.entry.csv", 
+                              sep = ""),
+                        sep = ",")
+
+length(unique(unmatched.data$collection))
+# [1] 779
+
+Cleaned.data2 <- fread(paste(here(dir), "/Data", survey.path, 
+                             "2003.2024.ATM.Survey.with.Specimen.Data.csv", 
+                             sep = ""), 
+                       sep = ",")
+
+length(unique(Cleaned.data2$collection))
+# [1] 1896
+
+```
+
+# Explore which collections were not accounted for
+
+```{r, isolate.unmatched.collections}
+
+# Find the missing collection ids
+original.collections.prestep <- unique(unmatched.data$collection) 
+ending.collections <- unique(Cleaned.data2$collection)
+
+# Isolate the position id
+vals <- !original.collections.prestep %in% ending.collections
+vals <- which(vals)
+
+# Create data frame to filter on
+id <- seq(1,length(original.collections.prestep),1)
+
+# Store collection names
+index.tab <- tibble(id, original.collections.prestep) %>%
+  filter(id %in% vals)
+
+# Filter original data
+missing.coll <- unmatched.data %>% 
+  filter(collection %in% index.tab$original.collections.prestep)
+# View(missing.coll)
+
+```
+
+# For absent data
+
+There is no need to redistribute weight, set everything to 0 or NA.
+
+```{r, absent.processing}
+
+missing.coll.abs <- missing.coll %>% 
+  # All but sardine
+  filter(scientific_name != "Sardinops sagax") %>%
+  # Group by transect
+  group_by(collection, ship, haul, equilibrium_time.pacific) %>% 
+  mutate(
+    # Set to zero because we only want this as a place holder
+    Species_weight = 0, 
+    # Set to zero because we only want this as a place holder
+    weight = 0,
+    # Set to zero because we only want this as a place holder
+    subsample_weight = 0,
+    # Set to zero because we only want this as a place holder
+    specimen_number = NA,
+    # Set to zero because we only want this as a place holder
+    subsample_count = 0
+    ) %>% 
+  ungroup() %>%
+  distinct()
+
+# Check for columns to add
+!colnames(Cleaned.data2) %in% colnames(missing.coll.abs)
+
+# Pull the names of the columns not in the missing.coll2.abs table
+new.cols <- Cleaned.data2 %>% select(c(2:3,13:14,16:21)) %>% names()
+new.cols
+
+# Check what latitude and longitude correspond to
+
+identical(Cleaned.data2$latitude, Cleaned.data2$start_latitude)
+# [1] TRUE
+
+identical(Cleaned.data2$longitude, Cleaned.data2$start_longitude)
+# [1] TRUE
+
+# Since latitude and longitude correspond to starting position, 
+# copy those values in the new missing.coll.abs data
+
+missing.coll.abs <- missing.coll.abs %>%
+  mutate(longitude = start_longitude,
+         latitude = start_latitude,
+         # for all other columns except
+         # FID, put 0 or NA
+         quality.indic = 0,
+         sex = NA,
+         is_random_sample = NA,
+         standard_length = NA,
+         fork_length = NA,
+         total_length = NA,
+         mantle_length = NA
+         ) %>%
+  distinct() %>%
+  mutate(# For FID, apply sequence from 
+         # max FID value in Cleaned.data2
+    FID = seq((max(Cleaned.data2$FID)+1), 
+              (max(Cleaned.data2$FID)+ nrow(missing.coll.abs)), 1)
+  )
+
+# View(missing.coll.abs)
+
+```
+
+# For present data
+
+```{r, present.processing}
+
+# For obs without a remaining_weight
+missing.coll.pres.nas <- missing.coll %>%
+  filter(is.na(remaining_weight) & scientific_name == "Sardinops sagax" &
+           !is.na(subsample_count)) %>%
+  # Group by transect
+  group_by(collection, ship, haul, equilibrium_time.pacific) %>% 
+  mutate(# Create a place holder for specimen weight
+    weight = NA,
+    remaining_weight = 0) %>%
+  mutate(
+    # Calculate species weight
+    Species_weight = (subsample_weight + remaining_weight)
+    ) %>%
+  ungroup()
+
+# For obs with a remaining_weight
+missing.coll.pres <- missing.coll %>%
+  filter(!is.na(remaining_weight) & 
+           scientific_name == "Sardinops sagax" & 
+           !is.na(subsample_count)) %>%
+  # Group by transect
+  group_by(collection, ship, haul, equilibrium_time.pacific) %>% 
+  mutate(# Create a place holder for specimen weight
+    weight = NA,
+    Species_weight = (subsample_weight + remaining_weight)
+    ) %>%
+  ungroup()
+
+# Join back data sets
+missing.coll.pres <- rbind(missing.coll.pres, missing.coll.pres.nas) 
+
+# Check for columns to add
+!colnames(Cleaned.data2) %in% colnames(missing.coll.pres)
+
+# Pull the names of the columns not in the missing.coll2.abs table
+new.cols <- Cleaned.data2 %>% select(c(2:3,5, 13:14,16:21)) %>% names()
+new.cols
+
+# Check what latitude and longitude correspond to
+
+identical(Cleaned.data2$latitude, Cleaned.data2$start_latitude)
+# [1] TRUE
+
+identical(Cleaned.data2$longitude, Cleaned.data2$start_longitude)
+# [1] TRUE
+
+# Since latitude and longitude correspond to starting position, 
+# copy those values in the new missing.coll.abs data
+
+missing.coll.pres <- missing.coll.pres %>%
+  mutate(longitude = start_longitude,
+         latitude = start_latitude,
+         # for all other columns except
+         # FID, put 0 or NA
+         quality.indic = 0,
+         sex = NA,
+         is_random_sample = NA,
+         standard_length = NA,
+         fork_length = NA,
+         total_length = NA,
+         mantle_length = NA
+         ) %>%
+  distinct() %>%
+  mutate(# For FID, apply sequence from 
+         # max FID value in Cleaned.data2
+    FID = seq((max(missing.coll.abs$FID)+1), 
+              (max(missing.coll.abs$FID)+ nrow(missing.coll.pres)), 1)
+  )
+
+# View(missing.coll.pres)
+
+```
+
+# Check if there are other observations to compare with
+
+The following code only works with spatial distances and not time.
+
+```{r, Check.lat.lon.vals}
+
+# Step 1: Convert both datasets to sf and project
+
+# For known data
+knownDat_sf <- Cleaned.data2 %>%
+  filter(scientific_name == "Sardinops sagax") %>%
+  st_as_sf(coords = c("start_longitude", "start_latitude"), crs = 4326) %>%
+  st_transform(5070)
+
+# Data to find closest obs.
+targetDat_sf <- missing.coll.pres %>%
+  st_as_sf(coords = c("start_longitude", "start_latitude"), crs = 4326) %>%
+  st_transform(5070)
+
+# Step 2: Compute distance matrix
+dist_matrix <- st_distance(targetDat_sf, knownDat_sf)
+
+# Step 3: For each row in targetDat_sf, get index of closest knownDat_sf row
+closest_idx <- apply(dist_matrix, 1, which.min)
+
+# Step 4: Extract closest lat/lon values (in original CRS)
+closest_points <- st_coordinates(st_transform(st_geometry(knownDat_sf)[closest_idx],
+                                              4326))
+closest_lons <- closest_points[, "X"]
+closest_lats <- closest_points[, "Y"]
+
+# Step 5: Add closest lat/lon to targetDat_sf
+targetDat_coords <- targetDat_sf %>%
+  mutate(target_date = as.Date(equilibrium_time.pacific),
+         closest_lon = round(closest_lons, 5),
+         closest_lat = round(closest_lats, 5)) %>%
+  st_drop_geometry()
+
+# Step 6: Add rounded coordinates to knownDat_sf (original CRS)
+knownDat_coords <- knownDat_sf %>%
+  mutate(source_date = as.Date(equilibrium_time.pacific),
+         rounded_lon = round(longitude, 5),
+         rounded_lat = round(latitude, 5)) %>%
+  st_drop_geometry()
+
+# Step 7: Join all Cleaned.data2 rows that match closest coordinates
+joinedDat <- targetDat_coords %>%
+  inner_join(knownDat_coords,
+             by = c("closest_lon" = "rounded_lon", "closest_lat" = "rounded_lat"),
+             relationship = "many-to-many")
+
+
+```
+
+# Explore time distance options
+
+```{r, check.time.vals}
+
+# Step 8: Filter by the closest date
+joinedDat2 <- joinedDat %>%
+  group_by(row_id = row_number()) %>%
+  mutate(date_diff = abs(difftime(target_date, source_date, units = "days"))) %>%
+  filter(date_diff == min(date_diff)) %>%
+  ungroup()
+
+# View(joinedDat2)
+
+t <- joinedDat2 %>%
+  select(c(weight.x,weight.y,Species_weight,longitude.x,longitude.y,latitude.x,latitude.y, subsample_count.x,subsample_count.y,subsample_weight.x,subsample_weight.y,remaining_weight.x,remaining_weight.y,equilibrium_time.pacific.x,equilibrium_time.pacific.y,FID.x,FID.y))
+
+# View(t)
+
+```
+
