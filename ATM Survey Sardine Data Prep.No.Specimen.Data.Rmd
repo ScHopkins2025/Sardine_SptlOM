@@ -13,7 +13,7 @@ output:
 rm(list=ls())
 gc()
 
-load.lib <- c("tidyverse", "data.table", "sf", "stars", "here")
+load.lib <- c("tidyverse", "data.table", "sf", "here", "units")
 
 install.lib <- load.lib[!load.lib %in% installed.packages()]
 
@@ -40,8 +40,8 @@ unmatched.data <- fread(paste(here(dir), "/Data", survey.path,
 length(unique(unmatched.data$collection))
 # [1] 779
 
-Cleaned.data2 <- fread(paste(here(dir), "/Data", survey.path, 
-                             "2003.2024.ATM.Survey.with.Specimen.Data.csv", 
+Cleaned.data2 <- fread(paste(here(dir), "/Data", survey.path,
+                             "2003.2024.ATM.Survey.with.specimen.data.csv", 
                              sep = ""), 
                        sep = ",")
 
@@ -50,13 +50,28 @@ length(unique(Cleaned.data2$collection))
 
 ```
 
-# Explore which collections were not accounted for
+# Check for collections accounted for
 
-```{r, isolate.unmatched.collections}
+```{r, accounted.for.collections}
 
 # Find the missing collection ids
 original.collections.prestep <- unique(unmatched.data$collection) 
 ending.collections <- unique(Cleaned.data2$collection)
+
+# Isolate the position id
+Accvals <- original.collections.prestep %in% ending.collections
+Accvals <- which(Accvals)
+Accvals
+
+rm(Accvals)
+
+```
+
+Hauls without specimen data are unique and not accounted for in the original data filtering method. The next step is to try and reconcile these hauls and systematic way while minimizing assumptions around them.
+
+# Explore which collections were not accounted for
+
+```{r, isolate.unmatched.collections}
 
 # Isolate the position id
 vals <- !original.collections.prestep %in% ending.collections
@@ -76,17 +91,23 @@ missing.coll <- unmatched.data %>%
 
 ```
 
-# For absent data
+The majority of unaccounted for hauls correspond to absence data so we can just add corresponding column names and values.
 
-There is no need to redistribute weight, set everything to 0 or NA.
+## For absent data
 
-```{r, absent.processing}
+We are only interesting in this point as a location where Sardine are not.
+
+### Add place holders
+
+There is no need to redistribute weight, set everything to 0 or NA. 
+
+```{r, absent.placeholders}
 
 missing.coll.abs <- missing.coll %>% 
   # All but sardine
   filter(scientific_name != "Sardinops sagax") %>%
   # Group by transect
-  group_by(collection, ship, haul, equilibrium_time.pacific) %>% 
+  group_by(collection, ship, haul, equilibrium_time.utc) %>% 
   mutate(
     # Set to zero because we only want this as a place holder
     Species_weight = 0, 
@@ -102,11 +123,19 @@ missing.coll.abs <- missing.coll %>%
   ungroup() %>%
   distinct()
 
+```
+
+### Secondly, look for spatial equivalence columns
+
+Find corresponding spatial columns in the initial pre-processed data.
+
+```{r, absent.spatial.columns}
+
 # Check for columns to add
 !colnames(Cleaned.data2) %in% colnames(missing.coll.abs)
 
 # Pull the names of the columns not in the missing.coll2.abs table
-new.cols <- Cleaned.data2 %>% select(c(2:3,13:14,16:21)) %>% names()
+new.cols <- Cleaned.data2 %>% select(c(2:3,14:15,17:22)) %>% names()
 new.cols
 
 # Check what latitude and longitude correspond to
@@ -117,15 +146,23 @@ identical(Cleaned.data2$latitude, Cleaned.data2$start_latitude)
 identical(Cleaned.data2$longitude, Cleaned.data2$start_longitude)
 # [1] TRUE
 
+```
+
+### Check column names and structure
+
+To be able to join the modified data back to the original pre-processed data, check that all columns are present and in the same structural format.
+
+```{r, absent.remaining.columns}
+
 # Since latitude and longitude correspond to starting position, 
 # copy those values in the new missing.coll.abs data
-
 missing.coll.abs <- missing.coll.abs %>%
   mutate(longitude = start_longitude,
          latitude = start_latitude,
          # for all other columns except
          # FID, put 0 or NA
          quality.indic = 0,
+         specimen_number = NA,
          sex = NA,
          is_random_sample = NA,
          standard_length = NA,
@@ -144,7 +181,13 @@ missing.coll.abs <- missing.coll.abs %>%
 
 ```
 
-# For present data
+## For present data
+
+For these observations, the goal is to find hauls with closest temporal and spatial distance to approximate the haul length frequency distributions based on length composition and proportional weight. We assume here that temporal distributions are more important than spatial distributions. 
+
+### First create nescessary remaining weight columns
+
+To calculate species weight, we need to obtain remaining weight. Because some values are recorded, while others are not, we need to treat them separately before joining them back together.
 
 ```{r, present.processing}
 
@@ -153,9 +196,8 @@ missing.coll.pres.nas <- missing.coll %>%
   filter(is.na(remaining_weight) & scientific_name == "Sardinops sagax" &
            !is.na(subsample_count)) %>%
   # Group by transect
-  group_by(collection, ship, haul, equilibrium_time.pacific) %>% 
+  group_by(collection, ship, haul, equilibrium_time.utc) %>% 
   mutate(# Create a place holder for specimen weight
-    weight = NA,
     remaining_weight = 0) %>%
   mutate(
     # Calculate species weight
@@ -169,46 +211,37 @@ missing.coll.pres <- missing.coll %>%
            scientific_name == "Sardinops sagax" & 
            !is.na(subsample_count)) %>%
   # Group by transect
-  group_by(collection, ship, haul, equilibrium_time.pacific) %>% 
+  group_by(collection, ship, haul, equilibrium_time.utc) %>% 
   mutate(# Create a place holder for specimen weight
-    weight = NA,
     Species_weight = (subsample_weight + remaining_weight)
     ) %>%
   ungroup()
 
 # Join back data sets
-missing.coll.pres <- rbind(missing.coll.pres, missing.coll.pres.nas) 
+missing.coll.pres <- rbind(missing.coll.pres, missing.coll.pres.nas)
+
+```
+
+### Secondly, look for spatial equivalence columns
+
+Here columns are added similar to the absence data, and spatial columns in the initial pre-processed data are compared to find corresponding spatial columns in the missing.coll.pres data.
+
+```{r, present.processing}
 
 # Check for columns to add
 !colnames(Cleaned.data2) %in% colnames(missing.coll.pres)
 
 # Pull the names of the columns not in the missing.coll2.abs table
-new.cols <- Cleaned.data2 %>% select(c(2:3,5, 13:14,16:21)) %>% names()
+new.cols <- Cleaned.data2 %>% select(c(2:3,5,9,14:15,17:22)) %>% names()
 new.cols
 
-# Check what latitude and longitude correspond to
-
-identical(Cleaned.data2$latitude, Cleaned.data2$start_latitude)
-# [1] TRUE
-
-identical(Cleaned.data2$longitude, Cleaned.data2$start_longitude)
-# [1] TRUE
-
 # Since latitude and longitude correspond to starting position, 
-# copy those values in the new missing.coll.abs data
-
+# copy those values in the new missing.coll.pres data
 missing.coll.pres <- missing.coll.pres %>%
   mutate(longitude = start_longitude,
          latitude = start_latitude,
-         # for all other columns except
-         # FID, put 0 or NA
          quality.indic = 0,
-         sex = NA,
-         is_random_sample = NA,
-         standard_length = NA,
-         fork_length = NA,
-         total_length = NA,
-         mantle_length = NA
+         
          ) %>%
   distinct() %>%
   mutate(# For FID, apply sequence from 
@@ -221,77 +254,182 @@ missing.coll.pres <- missing.coll.pres %>%
 
 ```
 
-# Check if there are other observations to compare with
+### Check if there are other observations to compare with
 
-The following code only works with spatial distances and not time.
+Match corresponding length frequency data by time and space
 
-```{r, Check.lat.lon.vals}
+```{r, Check.spatial.temporal.distance}
 
-# Step 1: Convert both datasets to sf and project
+source("~/Final.OM.spatial.structure/functions.R")
 
-# For known data
-knownDat_sf <- Cleaned.data2 %>%
+# Create transect data
+targetDat_sf <- make_transect_sf(missing.coll.pres) %>%
+  mutate(DatSource = "target") %>%
+  make_transect_sf(.) %>%
+  distinct() %>%
+  group_by(collection, ship, haul, equilibrium_time.utc, DatSource, geometry) %>%
+  # Create a single group id and assign it to all rows in that group
+  mutate(key = cur_group_id()) %>%
+  ungroup()
+
+# Create unique grouping key
+Cleaned.data2.temp <- Cleaned.data2 %>%
   filter(scientific_name == "Sardinops sagax") %>%
-  st_as_sf(coords = c("start_longitude", "start_latitude"), crs = 4326) %>%
-  st_transform(5070)
+  make_transect_sf(.) %>%
+  distinct() %>%
+  group_by(collection, ship, haul, equilibrium_time.utc, geometry) %>%
+  # Create a single group id and assign it to all rows in that group
+  mutate(key = cur_group_id()) %>%
+  ungroup()
+  
+# For known data (pre-processed data where specimen samples are present)
+knownDat_sf <- Cleaned.data2.temp %>%
+  select(key, cruise, collection, ship, haul, equilibrium_time.utc, geometry) %>%
+  distinct() %>% 
+  mutate(DatSource = "source")
+  
+# Extract projected coordinates (in meters)
+targetDat_xy <- st_geometry(st_centroid(targetDat_sf))
+knownDat_xy <- st_geometry(st_centroid(knownDat_sf))
 
-# Data to find closest obs.
-targetDat_sf <- missing.coll.pres %>%
-  st_as_sf(coords = c("start_longitude", "start_latitude"), crs = 4326) %>%
-  st_transform(5070)
+## Spatial distance matrix (Euclidean in meters)
+dist_matrix <- st_distance(targetDat_xy, knownDat_xy)
+dim(dist_matrix)
+# [1] 7 757
 
-# Step 2: Compute distance matrix
-dist_matrix <- st_distance(targetDat_sf, knownDat_sf)
+# Remove the units (in metres)
+dist_matrix.no.units <- drop_units(dist_matrix)
 
-# Step 3: For each row in targetDat_sf, get index of closest knownDat_sf row
-closest_idx <- apply(dist_matrix, 1, which.min)
+## Time distance matrix (in mins)
+temp_matrix <- compute_time_diff_matrix(targetDat_sf$equilibrium_time.utc,
+                                        knownDat_sf$equilibrium_time.utc,
+                                        units = "secs")
+dim(temp_matrix)
+# [1] 7 757
 
-# Step 4: Extract closest lat/lon values (in original CRS)
-closest_points <- st_coordinates(st_transform(st_geometry(knownDat_sf)[closest_idx],
-                                              4326))
-closest_lons <- closest_points[, "X"]
-closest_lats <- closest_points[, "Y"]
+#-------------------------------------------------------------------------------
+# Combine with weights
+#-------------------------------------------------------------------------------
 
-# Step 5: Add closest lat/lon to targetDat_sf
-targetDat_coords <- targetDat_sf %>%
-  mutate(target_date = as.Date(equilibrium_time.pacific),
-         closest_lon = round(closest_lons, 5),
-         closest_lat = round(closest_lats, 5)) %>%
+# Create a spatial weight measure for metres
+spatial_weight <- 1
+
+# Create a temporal weight measure for seconds 
+## Note this is like treating 1 second as 1 meter
+time_weight <- 1
+
+# Now combine
+combined_score <- dist_matrix.no.units * spatial_weight + temp_matrix * time_weight
+
+# Index of nearest matching (row in knownDat_sf)
+nearest_index <- apply(combined_score, 1, function(x) which.min(x))
+nearest_index
+
+#-------------------------------------------------------------------------------
+# Add keys and values
+#-------------------------------------------------------------------------------
+
+# Append matched values (change 'FID' and others to your actual column names)
+targetDat_sf$nearest_key <- knownDat_sf$key[nearest_index]
+
+# Append nearest Date/Time values
+targetDat_sf$nearest_tim <-
+  knownDat_sf$equilibrium_time.utc[nearest_index]
+
+# Append nearest haul day
+targetDat_sf$minTempDist_d <- temp_matrix[cbind(seq_len(nrow(temp_matrix)),
+                                                nearest_index)]/(60*60*24)
+
+# Append nearest haul coordinates
+targetDat_sf$nearest_haul_loc <- 
+  as.character(st_geometry(st_centroid(knownDat_sf))[nearest_index]) %>%
   st_drop_geometry()
 
-# Step 6: Add rounded coordinates to knownDat_sf (original CRS)
-knownDat_coords <- knownDat_sf %>%
-  mutate(source_date = as.Date(equilibrium_time.pacific),
-         rounded_lon = round(longitude, 5),
-         rounded_lat = round(latitude, 5)) %>%
-  st_drop_geometry()
+# Append nearest km distance between hauls
+targetDat_sf$minSptlDist_km <- 
+  dist_matrix.no.units[cbind(seq_len(nrow(dist_matrix.no.units)),
+                             nearest_index)]/1000
 
-# Step 7: Join all Cleaned.data2 rows that match closest coordinates
-joinedDat <- targetDat_coords %>%
-  inner_join(knownDat_coords,
-             by = c("closest_lon" = "rounded_lon", "closest_lat" = "rounded_lat"),
-             relationship = "many-to-many")
-
+# Append metre/second combined value
+targetDat_sf$combined_score <- combined_score[nearest_index]
+# View(targetDat_sf)
 
 ```
 
-# Explore time distance options
+### Join lenth comps based on closest values
+  
+```{r, assign.closes.lenComps}
 
-```{r, check.time.vals}
+filldat <- Cleaned.data2.temp %>%
+  filter(key %in% targetDat_sf$nearest_key) %>%
+  mutate(nearest_key = key) %>%
+  select(nearest_key, weight, standard_length) %>%
+  st_drop_geometry()
 
-# Step 8: Filter by the closest date
-joinedDat2 <- joinedDat %>%
-  group_by(row_id = row_number()) %>%
-  mutate(date_diff = abs(difftime(target_date, source_date, units = "days"))) %>%
-  filter(date_diff == min(date_diff)) %>%
-  ungroup()
+targetDat_sf.f <- inner_join(targetDat_sf, filldat, relationship = "many-to-many")
+#View(targetDat_sf.f)
 
-# View(joinedDat2)
+```
 
-t <- joinedDat2 %>%
-  select(c(weight.x,weight.y,Species_weight,longitude.x,longitude.y,latitude.x,latitude.y, subsample_count.x,subsample_count.y,subsample_weight.x,subsample_weight.y,remaining_weight.x,remaining_weight.y,equilibrium_time.pacific.x,equilibrium_time.pacific.y,FID.x,FID.y))
+### Save summary of corresponding values
 
-# View(t)
+```{r, summary}
+
+targetDat_sf.f.summary <- targetDat_sf.f %>%
+  select(cruise, ship, haul, collection, start_latitude, start_longitude,
+         stop_latitude, stop_longitude, equilibrium_time.utc, nearest_key,
+         nearest_tim, minTempDist_d, nearest_haul_loc, minSptlDist_km,
+         combined_score) %>%
+  distinct() %>%
+  st_drop_geometry()
+
+View(targetDat_sf.f.summary)
+
+fwrite(targetDat_sf.f.summary, 
+       paste(here(dir), "/Data", survey.path,
+             "ATM.Survey.estimated.specimen.weight-lenComps.csv", 
+             sep = ""),
+       sep = ",")
+
+```
+
+### Distribute weight among lengths
+ 
+```{r, specimen.weight.partitioning}
+
+targetDat_sf.f <- targetDat_sf.f %>%
+  group_by(collection, ship, haul, equilibrium_time.utc, scientific_name) %>%
+  mutate(prop.len.wgt = weight/sum(weight),
+         sex = NA,
+         mantle_length = NA,
+         fork_length = NA,
+         total_length = NA,
+         is_random_sample = NA,
+         specimen_number = NA) %>%
+  ungroup() %>%
+  group_by(collection,standard_length) %>%
+  mutate(new.wgt = subsample_weight*prop.len.wgt) %>%
+  ungroup() %>%
+  distinct() %>%
+  mutate(weight = new.wgt) %>%
+  select(-c(new.wgt, nearest_key, nearest_tim, minTempDist_d, nearest_haul_loc,
+            minSptlDist_km, combined_score, key, DatSource, prop.len.wgt)) %>%
+  st_drop_geometry()
+# View(targetDat_sf.f)
+
+```
+
+# Join all data sets
+
+```{r, final.merge}
+
+allDat <- rbind(missing.coll.abs, Cleaned.data2, targetDat_sf.f)
+  
+fwrite(allDat, 
+       paste(here(dir), "/Data", survey.path,
+             "2003.2024.ATM.Survey.with.integrated.specimen.data.csv", 
+             sep = ""),
+       sep = ",")
 
 ```
 
