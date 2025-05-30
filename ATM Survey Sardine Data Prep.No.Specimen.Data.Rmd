@@ -24,6 +24,8 @@ dir <- here(getwd())
 
 survey.path <- "/Survey.Data/"
 
+source("~/Final.OM.spatial.structure/functions.R")
+
 ```
 
 # Load unmatched original and cleaned data
@@ -176,7 +178,6 @@ missing.coll.abs <- missing.coll.abs %>%
     FID = seq((max(Cleaned.data2$FID)+1), 
               (max(Cleaned.data2$FID)+ nrow(missing.coll.abs)), 1)
   )
-
 # View(missing.coll.abs)
 
 ```
@@ -249,7 +250,6 @@ missing.coll.pres <- missing.coll.pres %>%
     FID = seq((max(missing.coll.abs$FID)+1), 
               (max(missing.coll.abs$FID)+ nrow(missing.coll.pres)), 1)
   )
-
 # View(missing.coll.pres)
 
 ```
@@ -260,8 +260,6 @@ Match corresponding length frequency data by time and space
 
 ```{r, Check.spatial.temporal.distance}
 
-source("~/Final.OM.spatial.structure/functions.R")
-
 # Create transect data
 targetDat_sf <- make_transect_sf(missing.coll.pres) %>%
   mutate(DatSource = "target") %>%
@@ -270,7 +268,8 @@ targetDat_sf <- make_transect_sf(missing.coll.pres) %>%
   group_by(collection, ship, haul, equilibrium_time.utc, DatSource, geometry) %>%
   # Create a single group id and assign it to all rows in that group
   mutate(key = cur_group_id()) %>%
-  ungroup()
+  ungroup() %>%
+  st_transform(., crs = 5070)
 
 # Create unique grouping key
 Cleaned.data2.temp <- Cleaned.data2 %>%
@@ -286,7 +285,8 @@ Cleaned.data2.temp <- Cleaned.data2 %>%
 knownDat_sf <- Cleaned.data2.temp %>%
   select(key, cruise, collection, ship, haul, equilibrium_time.utc, geometry) %>%
   distinct() %>% 
-  mutate(DatSource = "source")
+  mutate(DatSource = "source") %>%
+  st_transform(., crs = 5070)
   
 # Extract projected coordinates (in meters)
 targetDat_xy <- st_geometry(st_centroid(targetDat_sf))
@@ -341,8 +341,11 @@ targetDat_sf$minTempDist_d <- temp_matrix[cbind(seq_len(nrow(temp_matrix)),
                                                 nearest_index)]/(60*60*24)
 
 # Append nearest haul coordinates
-targetDat_sf$nearest_haul_loc <- 
-  as.character(st_geometry(st_centroid(knownDat_sf))[nearest_index]) %>%
+targetDat_sf <- targetDat_sf %>%
+  mutate(nearest_haul_loc = st_geometry(st_centroid(knownDat_sf))[nearest_index] %>%
+  # Convert back to WGS84
+  st_transform(., crs = 4326)) %>%
+  mutate(nearest_haul_loc = as.character(nearest_haul_loc)) %>%
   st_drop_geometry()
 
 # Append nearest km distance between hauls
@@ -382,8 +385,7 @@ targetDat_sf.f.summary <- targetDat_sf.f %>%
          combined_score) %>%
   distinct() %>%
   st_drop_geometry()
-
-View(targetDat_sf.f.summary)
+# View(targetDat_sf.f.summary)
 
 fwrite(targetDat_sf.f.summary, 
        paste(here(dir), "/Data", survey.path,
@@ -419,12 +421,28 @@ targetDat_sf.f <- targetDat_sf.f %>%
 
 ```
 
+### Recode FID to account for length comps
+
+Because we expanded the original row numbers (FID) values to account for length compositions, FID values need to be reassigned. 
+
+```{r, new.FIDs}
+
+targetDat_sf.f2 <- targetDat_sf.f %>%
+  mutate(FID = seq(min(targetDat_sf.f$FID), 
+              (min(targetDat_sf.f$FID) + nrow(targetDat_sf.f)-1), 1))
+# View(targetDat_sf.f2)
+
+```
+
 # Join all data sets
 
 ```{r, final.merge}
 
-allDat <- rbind(missing.coll.abs, Cleaned.data2, targetDat_sf.f)
-  
+allDat <- rbind(missing.coll.abs, Cleaned.data2, targetDat_sf.f2)
+
+# Check that FID was applied correctly
+unique(duplicated(allDat$FID))
+
 fwrite(allDat, 
        paste(here(dir), "/Data", survey.path,
              "2003.2024.ATM.Survey.with.integrated.specimen.data.csv", 

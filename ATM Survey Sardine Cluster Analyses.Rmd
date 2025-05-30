@@ -13,7 +13,7 @@ output:
 rm(list=ls())
 gc()
 
-load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "grid", "ggspatial", "ggnewscale", "RColorBrewer", "scales", "rcompanion", "rnaturalearth", "rnaturalearthhires", "r4ss", "patchwork", "rmapshaper", "zoo", "suncalc", "here", "furrr")
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "ggspatial", "ggnewscale", "rcompanion", "rnaturalearth", "rnaturalearthhires", "r4ss", "patchwork", "zoo", "suncalc", "here", "furrr")
 
 install.lib <- load.lib[!load.lib %in% installed.packages()]
 
@@ -28,6 +28,8 @@ survey.path <- "/Survey.Data/"
 
 Figure.path <- "Figures/"
 
+source("~/Final.OM.spatial.structure/functions.R")
+
 ```
 
 # Read data
@@ -36,14 +38,18 @@ Remember to convert length to cm to be able to use VBGF!
 
 ```{r, read.data}
 
-full.series <- fread(paste(here(dir), "/Data", survey.path,
-                           "2003.2024.ATM.Survey.csv", sep = ""),
-                     sep = ",") %>%
+full.series <- 
+  fread(paste(here(dir), 
+              "/Data", survey.path,
+              "2003.2024.ATM.Survey.with.integrated.specimen.data.csv", 
+              sep = ""), sep = ",") %>%
   # convert mm to cm to be able to use VBGF
   mutate(standard_length = standard_length/10) 
 
 length(unique(full.series$collection))
-# [1] 1891
+# [1] 2675
+
+colnames(full.series)
 
 ```
 
@@ -58,29 +64,29 @@ Note that we are taking the mean of the starting point and ending point to denot
 # ----------------------------------------------
 
 range(full.series$start_latitude)
-# [1] 28.6513 54.3102
+# [1] 28.6513 54.3997
 Lat1 <- full.series$start_latitude
 
 mean(full.series$start_latitude)
-# [1] 39.513
+# [1] 39.06714
 
 range(full.series$start_longitude)
-# [1] -132.7302 -114.7928
+# [1] -134.0793 -114.7928
 Lon1 <- full.series$start_longitude
 
 mean(full.series$start_longitude)
-# [1] -122.6376
+# [1] -122.4603
 
 #--------------------------------------------------------------------
 # For hauling location
 # ----------------------------------------------
 
 range(full.series$stop_latitude)
-# [1] 28.6548 54.2875
+# [1] 28.6548 54.4157
 Lat2 <- full.series$stop_latitude
 
 range(full.series$stop_longitude)
-# [1] -132.7783 -114.8483
+# [1] -134.0325 -114.8483
 Lon2 <- full.series$stop_longitude
 
 #--------------------------------------------------------------------
@@ -104,10 +110,10 @@ This will tell us whether or not to clip the data when we make plots.
 ```{r lat.lon.extent}
 
 range(full.series$LAT)
-# [1] 28.65305 54.29885
+# [1] 28.65305 54.40770
 
 range(full.series$LON)
-# [1] -132.7543 -114.8205
+# [1] -134.0559 -114.8205
 
 ```
 
@@ -117,16 +123,8 @@ For each haul transect, group together the starting and stopping latitudinal lon
 
 ```{r, spatial.transects.defs}
 
-# Step 1) Create a linestring for each transect
-line_geoms <- mapply(function(lon1, lat1, lon2, lat2) {
-  st_linestring(matrix(c(lon1, lat1, lon2, lat2), ncol = 2, byrow = TRUE))
-},
-full.series$start_longitude, full.series$start_latitude,
-full.series$stop_longitude, full.series$stop_latitude,
-SIMPLIFY = FALSE)
-
-# Turn into sf object
-trip_rect <- st_sf(full.series, geometry = st_sfc(line_geoms, crs = 4326))
+# Create a linestring for each transect
+test <- make_transect_sf(full.series)
   
 ```
 
@@ -137,11 +135,13 @@ Note that for initial plots, CPUE was defined as kg/hr, but since we are estimat
 ```{r, calculate.fishing.duration}
 
 full.series.sf <- trip_rect %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.utc, collection, geometry) %>%
   mutate(haulback_time.pacific = 
-           strptime(haulback_time.pacific, "%Y-%m-%d %H:%M:%S"),
+           strptime(haulback_time.utc, "%Y-%m-%d %H:%M:%S", 
+                    tz = "America/Los_Angeles"),
          equilibrium_time.pacific = 
-           strptime(equilibrium_time.pacific, "%Y-%m-%d %H:%M:%S")) %>%
+           strptime(equilibrium_time.utc, "%Y-%m-%d %H:%M:%S", 
+                    tz = "America/Los_Angeles")) %>%
   ungroup() %>%
   group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
   mutate(haulback_t = as.numeric(format(haulback_time.pacific, "%H")) + 
@@ -167,8 +167,7 @@ Note that here we are standardizing and correcting the data to remove noise and 
 
 ```{r, convert.to.age}
 
-# Note that the sum of weight (individual weight obs) should equal the subsample_weight 
-# (checked in data prep code)
+# Note that the sum of weight (individual weight obs) should equal the subsample_weight (checked in data prep code)
 Sardine <- full.series.sf %>% 
   filter(scientific_name == "Sardinops sagax") %>%
   group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, 
@@ -198,14 +197,14 @@ Sardine <- full.series.sf %>%
   # Take the proportion of the mean weight at length in the catch 
   mutate(EstimatedWeight = sum(PropLen*TheoreticalWgt_i)*Total_N) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, Total_N,
-           duration, LAT, LON) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry,
+           Total_N, duration, LAT, LON) %>%
   #  Adjust the total weight (sampled + unsampled weight) based on the proportion of
   # mean weight at length
   mutate(Correction.factor = sum(Total_W)/EstimatedWeight) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, Total_N,
-           duration, LAT, LON) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry,
+           Total_N, duration, LAT, LON) %>%
   # Multiple the proportion of lengths represented in the catch by the adjusted
   # proportion of weight represented by length
   mutate(CatchWeightLen = Total_N*PropLen*TheoreticalWgt_i*Correction.factor) %>%
@@ -214,24 +213,26 @@ Sardine <- full.series.sf %>%
 # View(Sardine)
 
 range(Sardine$Total_W)
-# [1] 0.0005 364013.8000
+# [1]0.0005 1559162.8353
 
 # View(Sardine)
 
 ```
 
+## Check outputs
+
 ```{r, check.length.distributions}
 
 dim(Sardine)
-# [1] 10032    19
+# [1] 10342   19
 
 dim(distinct(Sardine))
-# [1] 10032    19
+# [1] 10342   19
 
 summary(distinct(Sardine))
 
 sum(Sardine$NBRE_IN)
-# [1] 775645
+# [1] 800004
 
 Sardine$equilibrium_time.pacific <- as.factor(Sardine$equilibrium_time.pacific)
 
@@ -339,7 +340,8 @@ Use the values extracted from the ss model for pacific sardine
 
 # Apply VBGF
 Sardine2 <- Sardine %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, duration) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry,
+           duration) %>%
   mutate(age = round((-1/K)*log(1-(standard_length/Linf)) + A_a_L0)) %>% 
   ungroup() %>%
   group_by(age) %>%
@@ -353,7 +355,7 @@ sardine2.nans.pt1 <- Sardine2 %>%
 
 # How many observations are lost
 dim(sardine2.nans.pt1)
-# [1] 760  21
+# [1] 772  21
 
 # What lengths are not represented
 sardine2.nans.pt2 <- sardine2.nans.pt1 %>%
@@ -522,7 +524,8 @@ This is the same procedure as above, only in place of age we now have length bin
 ```{r, length.bin.cpues}
 
 len.bins3 <- len.bins2 %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, len.bin, duration, geometry) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, len.bin, duration, 
+           geometry) %>%
   mutate(Catch.wt = sum(CatchWeightLen)) %>%
   mutate(log1p.CPUE.trp = log1p(Catch.wt / as.numeric(duration))) %>%
   ungroup() %>%
@@ -539,12 +542,15 @@ len.bins3 <- len.bins2 %>%
   group_by(cruise, ship, haul, equilibrium_time.pacific, len.bin, geometry) %>%
   mutate(time.step = paste(Year," - ", Season, sep="")) %>%
   ungroup() %>%
-  select(collection, age, len.bin, Catch.wt, log1p.CPUE.trp, Year, Month, Season, time.step,
-         geometry, equilibrium_time.pacific, standard_length, NBRE_IN, Total_N, LON, LAT,
-         CatchWeightLen) %>%
+  select(collection, age, len.bin, Catch.wt, log1p.CPUE.trp, Year, Month, Season,
+         time.step, geometry, equilibrium_time.pacific, standard_length, NBRE_IN,
+         Total_N, LON, LAT, CatchWeightLen) %>%
   mutate(keys = paste(collection, Year, Month, Season, geometry, time.step,
                       equilibrium_time.pacific, sep="")) %>%
-  distinct()
+  distinct() %>%
+  # Because equilibrium_time.pacific is changed to factor, change it back
+  # to POSIXct
+  mutate(equilibrium_time.pacific = as.POSIXct(equilibrium_time.pacific))
 
 # Find min and max values for plots
 lim.max <- max(len.bins3$log1p.CPUE.trp)
@@ -585,9 +591,9 @@ Others <- full.series.sf %>%
   mutate(time.step = paste(Year," - ", Season, sep="")) %>%
   ungroup() %>%
   st_transform(.,crs = 4326) %>%
-  select(collection, age, len.bin, Catch.wt, log1p.CPUE.trp, Year, Month, Season, time.step,
-         geometry, equilibrium_time.pacific, standard_length, NBRE_IN, Total_N, LON, LAT,
-         CatchWeightLen) %>%
+  select(collection, age, len.bin, Catch.wt, log1p.CPUE.trp, Year, Month, Season,
+         time.step, geometry, equilibrium_time.pacific, standard_length, NBRE_IN,
+         Total_N, LON, LAT, CatchWeightLen) %>%
   mutate(keys = paste(collection, Year, Month, Season, geometry, time.step,
                       equilibrium_time.pacific, sep="")) %>%
   distinct()
@@ -607,6 +613,8 @@ Absent <- Others %>%
 # View(Absent)
 
 PreAbs <- rbind(len.bins3, Absent)  %>%
+  mutate(equilibrium_time.pacific = as.POSIXct(equilibrium_time.pacific, 
+                                               tz = "America/Los_Angeles")) %>%
   mutate(date = as.Date(equilibrium_time.pacific))
 # View(PreAbs)
 
@@ -634,7 +642,7 @@ Note this is only for graph labels and is chosen based on the mean lat and lon v
 ```{r, Create.plot.label.breaks}
 
 range(PreAbs$LAT)  
-# [1] 28.65305 54.29885
+# [1] 28.65305 54.40770
 
 lat_breaks <- seq(27, 55, 4)  # Latitude breaks
 
@@ -660,7 +668,8 @@ Note that cropping should be done before projecting the data and projecting the 
 #-------------------------
 
 PacificCoast <- ne_countries(scale = 10, returnclass = "sf") 
-PacificCoast2 <- st_crop(PacificCoast, xmin = -133, xmax = -110, ymin = 25, ymax = 55)
+PacificCoast2 <- st_crop(PacificCoast, xmin = -133, xmax = -110, ymin = 25, 
+                         ymax = 55)
 class(PacificCoast2)
 
 #---------------------------------------------------------------------------------
@@ -733,7 +742,7 @@ PacificCoast4.wgs84.map
 
 st_bbox(PacificCoast4.wgs84)
 #     xmin ymin xmax ymax
-# [1] -127   27 -111   55
+# [1] -133   27 -111   55
 
 ```
 
@@ -911,13 +920,15 @@ sun_times <- fread(file = paste(sun_times.dir, "/sunrise_sunset_times.csv",
                                 sep=""), sep = ",") %>%
   mutate(LAT = lat,
          LON = lon,
-         date = as.Date(date)) %>%
+         date = as.character(date)) %>%
   select(-c(lat,lon))
+View(sun_times)
 
+PreAbs$date <- as.character(PreAbs$date)
 # Add sun_times to original data set
 area.transects <- left_join(PreAbs, sun_times, by = c("date", "LAT", "LON")) %>%
   st_transform(., crs = 5070)
-View(area.transects)  
+# View(area.transects)  
 
 # Filter hauls that are taken before 
 # sunset time that are after sunrise time
