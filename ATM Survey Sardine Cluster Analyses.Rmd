@@ -1590,15 +1590,18 @@ best_match <- intersections %>%
   select(date, clstr_g, Area_id)
 
 # 4. Join back to area.transects.buff and assign Area_id
-areaTranBuffsum.new <- areaTranBuffsum.new %>%
+areaTranBuffsum.polygons <- areaTranBuffsum.new %>%
   left_join(best_match, by = c("date", "clstr_g"))
 
-sort(unique(areaTranBuffsum.new$Area_id))
+sort(unique(areaTranBuffsum.polygons$Area_id))
 # [1] 1 2 3 4 5
-
 # View(areaTranBuffsum.new)
 
-write_sf(areaTranBuffsum.new, 
+# Add back month and year data
+areaTranBuffsum.polygons <- areaTranBuffsum.polygons %>%
+  separate(date, into = c("Year", "Month", "Day"))
+
+write_sf(areaTranBuffsum.polygons, 
        file.path(paste(bufferTrans.dir, "/cluster.with.area.defs.shp", sep="")))
 
 ```
@@ -1611,7 +1614,7 @@ bbox.frame.wgs84 <- bbox.frame %>%
   mutate(Area_id = as.factor(Area_id)) %>%
   st_transform(., crs = 4326)
 
-areaTranBuff.polygons.wgs84 <- areaTranBuffsum.new %>%
+areaTranBuff.polygons.wgs84 <- areaTranBuffsum.polygons %>%
   mutate(Area_id = as.factor(Area_id)) %>%
   st_transform(., crs = 4326)
 

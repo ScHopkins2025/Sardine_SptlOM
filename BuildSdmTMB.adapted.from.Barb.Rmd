@@ -55,20 +55,26 @@ dat2 <- dat %>%
   ungroup() %>% 
   select(yr,cruise, haul, lat, hauls) %>% 
   distinct()
-  
-View(dat2)
+  View(dat2)
 
 test2003 <- dat %>% filter(yr == 2003 & survey == 'cps')
 
 length(unique(test2003$haul))
 # [1] 41
+# View(test2003)
 
-View(test2003)
+```
+
+# Load new sdm data
+
+There will likely be some hauls not previously accounted, but the number of hauls should be similar. Use 2003 as a test run.
+
+```{r, load.new.dat}
 
 bufferTrans.dir <- here(getwd(), "Data", "Shapefiles")
 
 areaTranBuff.polygons <- read_sf(file.path(paste(bufferTrans.dir, "/cluster.with.area.defs.shp", sep="")))
-View(areaTranBuff.polygons)
+#View(areaTranBuff.polygons)
 
 areaTranBuff.polygons.2003 <- areaTranBuff.polygons %>%
   filter(Year == 2003)
@@ -76,6 +82,8 @@ areaTranBuff.polygons.2003 <- areaTranBuff.polygons %>%
 unique(areaTranBuff.polygons.2003$eqlbrm_) 
 
 ```
+
+This resulted in 5 additional hauls than what was previously accounted for.
 
 # Check differences in observations
 
