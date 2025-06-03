@@ -37,6 +37,25 @@ make_transect_sf <- function(df,
   st_sf(data.frame(df), geometry = line_geoms)
 }
 
+#-------------------------------------------------------------------------------
+# Define function to get sunrise/sunset
+#-------------------------------------------------------------------------------
+
+get_sun_times <- function(lat, lon, date) {
+  times <- getSunlightTimes(date = date, 
+                            lat = lat, 
+                            lon = lon, 
+                            keep = c("sunrise", "sunset"), 
+                            # To update with desired tz
+                            tz = "America/Los_Angeles")
+  tibble(
+    date = date,
+    sunrise_pacific = times$sunrise,
+    sunset_pacific = times$sunset,
+    lat = lat,
+    lon = lon
+  )
+}
 
 #-------------------------------------------------------------------------------
 # Spatial difference matrix
