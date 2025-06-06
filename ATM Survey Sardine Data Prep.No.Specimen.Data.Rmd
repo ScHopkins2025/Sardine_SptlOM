@@ -221,6 +221,8 @@ missing.coll.pres <- missing.coll %>%
 # Join back data sets
 missing.coll.pres <- rbind(missing.coll.pres, missing.coll.pres.nas)
 
+unique(is.na(missing.coll.pres))
+
 ```
 
 ### Secondly, look for spatial equivalence columns
@@ -252,6 +254,8 @@ missing.coll.pres <- missing.coll.pres %>%
   )
 # View(missing.coll.pres)
 
+unique(is.na(missing.coll.pres))
+
 ```
 
 ### Check if there are other observations to compare with
@@ -271,6 +275,8 @@ targetDat_sf <- make_transect_sf(missing.coll.pres) %>%
   ungroup() %>%
   st_transform(., crs = 5070)
 
+unique(is.na(targetDat_sf))
+
 # Create unique grouping key
 Cleaned.data2.temp <- Cleaned.data2 %>%
   filter(scientific_name == "Sardinops sagax") %>%
@@ -280,6 +286,8 @@ Cleaned.data2.temp <- Cleaned.data2 %>%
   # Create a single group id and assign it to all rows in that group
   mutate(key = cur_group_id()) %>%
   ungroup()
+
+unique(is.na(Cleaned.data2.temp))
   
 # For known data (pre-processed data where specimen samples are present)
 knownDat_sf <- Cleaned.data2.temp %>%
@@ -287,7 +295,9 @@ knownDat_sf <- Cleaned.data2.temp %>%
   distinct() %>% 
   mutate(DatSource = "source") %>%
   st_transform(., crs = 5070)
-  
+
+unique(is.na(knownDat_sf))
+
 # Extract projected coordinates (in meters)
 targetDat_xy <- st_geometry(st_centroid(targetDat_sf))
 knownDat_xy <- st_geometry(st_centroid(knownDat_sf))
@@ -356,6 +366,8 @@ targetDat_sf$minSptlDist_km <-
 # Append metre/second combined value
 targetDat_sf$combined_score <- combined_score[nearest_index]
 # View(targetDat_sf)
+
+View(targetDat_sf)
 
 ```
 
