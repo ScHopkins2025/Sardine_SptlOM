@@ -1,0 +1,14 @@
+"2","r error 4 (Error in regmatches(rmdChunkOpts, regexec(.rs.reRmdChunkBegin(), rmdChunkOpts)) : 
+  R_Reprotect: only 4 protected items, can't reprotect index -1
+)"
+"2","G1;H1;Errorh in which(search() == "".conflicts"") : 
+  R_Reprotect: only 3 protected items, can't reprotect index -2
+g"
+"2","G1;H1;Errorh in which(search() == "".conflicts"") : 
+  R_Reprotect: only 3 protected items, can't reprotect index -2
+g"
+"2","G1;H1;Errorh in xfun::split_lines(x) : 
+  R_Reprotect: only 4 protected items, can't reprotect index -1
+Error in regmatches(rmdChunkOpts, regexec(.rs.reRmdChunkBegin(), rmdChunkOpts)) : 
+  R_Reprotect: only 4 protected items, can't reprotect index -1
+g"

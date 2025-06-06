@@ -448,14 +448,20 @@ fwrite(targetDat_sf.f.summary,
 ```{r, specimen.weight.partitioning}
 
 targetDat_sf.f <- targetDat_sf.f %>%
-  group_by(collection, ship, haul, equilibrium_time.utc, scientific_name) %>%
+  group_by(collection, ship, haul, equilibrium_time.utc, scientific_name,
+           start_latitude, start_longitude, stop_latitude, stop_longitude) %>%
   mutate(prop.len.wgt = weight/sum(weight),
          sex = NA,
          mantle_length = NA,
          fork_length = NA,
          total_length = NA,
          is_random_sample = NA,
-         specimen_number = NA) %>%
+         # Because we extended the number of samples, index individuals
+         # sampled by row
+         specimen_number = seq(1,n()),
+         # Because we extended the number of samples, adjust the total individuals
+         # sampled, but keep the weights the same
+         subsample_count = n()) %>%
   ungroup() %>%
   group_by(collection,standard_length) %>%
   mutate(new.wgt = subsample_weight*prop.len.wgt) %>%
@@ -464,7 +470,7 @@ targetDat_sf.f <- targetDat_sf.f %>%
   mutate(weight = new.wgt) %>%
   select(-c(new.wgt, nearest_key, nearest_tim, minTempDist_d, nearest_haul_loc,
             minSptlDist_km, combined_score, key, DatSource, prop.len.wgt)) %>%
-  st_drop_geometry()
+  distinct()
 # View(targetDat_sf.f)
 
 ```
@@ -500,7 +506,7 @@ test.na.length <- allDat %>%
 unique(test.na.length)
 
 dim(allDat)
-# [1] 27171  34
+# [1] 27177  34
 
 fwrite(allDat, 
        paste(here(dir), "/Data", survey.path,

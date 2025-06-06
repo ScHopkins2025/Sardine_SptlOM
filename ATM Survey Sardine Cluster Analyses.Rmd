@@ -13,7 +13,7 @@ output:
 rm(list=ls())
 gc()
 
-load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "ggspatial", "ggnewscale", "rcompanion", "rnaturalearth", "rnaturalearthhires", "r4ss", "patchwork", "zoo", "suncalc", "here", "furrr")
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion", "rnaturalearth", "rnaturalearthhires", "r4ss", "zoo", "suncalc", "here", "furrr")
 
 install.lib <- load.lib[!load.lib %in% installed.packages()]
 
@@ -44,10 +44,12 @@ full.series <-
               "2003.2024.ATM.Survey.with.integrated.specimen.data.csv", 
               sep = ""), sep = ",") %>%
   # convert mm to cm to be able to use VBGF
-  mutate(standard_length = standard_length/10) 
+  mutate(standard_length = standard_length/10) %>%
+  select(-FID) %>%
+  distinct()
 
 length(unique(full.series$collection))
-# [1] 2675
+# [1] 2673
 
 colnames(full.series)
 
@@ -125,6 +127,8 @@ For each haul transect, group together the starting and stopping latitudinal lon
 
 # Create a linestring for each transect
 trip_rect <- make_transect_sf(full.series)
+
+summary(trip_rect)
   
 ```
 
@@ -242,8 +246,7 @@ Use the values extracted from the ss model for pacific sardine
 # Apply VBGF
 Sardine <- full.series.sf %>% 
   filter(scientific_name == "Sardinops sagax") %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, 
-           LAT, LON) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
   mutate(age = round((-1/K)*log(1-(standard_length/Linf)) + A_a_L0)) %>% 
   ungroup() %>%
   group_by(age) %>%
@@ -272,15 +275,23 @@ c(t(sardine.nans.pt2))
 # Plot age length per haul, average age per haul, and ss mle values 
 # (when excluding larger lengths from the data)...not a sensitivity analysis is 
 # still needed
-ggplot() + 
-  geom_point(data=na.omit(Sardine), aes(x=age, y=standard_length)) +
-  geom_line(data=na.omit(Sardine), aes(x=age, y=mean.length.age), col = "red") +
+age.length.plot <-
+  ggplot() + 
+  geom_point(data = Sardine, aes(x=age, y=standard_length), col = "black") +
+  geom_line(data = Sardine, aes(x=age, y=mean.length.age), col = "red") +
   geom_line(data=ss.age.len, aes(x=age.vals, y=mle.vals), col = "blue") + 
   scale_y_continuous(breaks = seq(0, 31, by = 2)) +
   scale_x_continuous(breaks = seq(0, 20, by = 1)) +
   ylab("Standard Length (cm)") +
   xlab("Estimate Age (yr)") +
   theme_classic()
+
+age.length.plot
+
+ggsave2(filename=paste("age.length.keys.jpeg",sep=''),
+        plot=age.length.plot, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
 
 ```
 
@@ -426,52 +437,97 @@ Note that here we are standardizing and correcting the data to remove noise and 
 
 ```{r, calculate.mean.weight.per.lenbin}
 
-# Note that the sum of weight (individual weight obs) should equal the subsample_weight (checked in data prep code)
-Sardine2 <- Sardine %>% 
+len.bins3 <- len.bins2 %>%
+  # Compute theoretical weight per individual
+  mutate(TheoreticalWgt_i = 7.52e-06 * standard_length^3.23,
+         ) %>%
+  
+  # Step 1: Aggregate per bin, haul, age
   group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, 
-           duration, LAT, LON) %>%
-  # Sum over the number of sampled weights and find the total weight of the catch 
-  mutate(Total_N = sum(subsample_count), 
-         Total_W = sum(subsample_weight+remaining_weight)) %>%
+           age, len.bin) %>%
+  mutate(
+    WGHT_bin = sum(as.numeric(weight)),
+    NBRE_bin = n(),
+    TheoreticalWgt_median = median(TheoreticalWgt_i),
+    # haul-level total count (assumed constant within haul)
+    NBRE_samp = sum(unique(subsample_count)),
+    # haul-level total weight (assumed constant within haul)
+    Total_W = sum(unique(Species_weight)),
+    .groups = "drop"
+  ) %>%
+  
+  # Step 2: Calculate proportion per bin
+  mutate(
+    PropLen_bin = NBRE_bin / NBRE_samp
+  ) %>%
+  
+  # Step 3: Calculate EstimatedWeight and Correction.factor per haul group
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
+  mutate(
+    EstimatedWeight = sum(PropLen_bin * TheoreticalWgt_median) * NBRE_samp,
+    Correction.factor = Total_W / EstimatedWeight
+  ) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry,
-           standard_length, Total_N, Total_W, duration, LAT, LON) %>% 
-  # Remove entries where there are no length observations and sum sampled number 
-  # and weight
-  filter(!is.na(standard_length)) %>%
-  summarise(NBRE_IN = sum(subsample_count), 
-            WGHT_IN = sum(as.numeric(weight)),
-            .groups = "keep") %>%
-  ungroup() %>% 
+  
+  # Step 4: Calculate corrected catch weight per bin
+  mutate(
+    CatchWeightLen_bin = NBRE_bin * TheoreticalWgt_median * Correction.factor
+  )
+
+summary(len.bins3)
+
+View(len.bins3)
+
+```
+
+```{r, calculate.mean.weight.per.lenbin}
+
+# Note that the sum of weight (individual weight obs) should equal the 
+# subsample_weight (checked in data prep code)
+## Sum the number of sampled individuals and total weight of the catch 
+## Note that in this case both are already provided / calculated
+len.bins3 <- len.bins2 %>% 
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
+  mutate(NBRE_samp = subsample_count, 
+         Total_W = Species_weight) %>%
+  ungroup() %>%
+  # Sum over length bins per haul
   group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, 
-           duration, LAT, LON) %>% 
-  # Determine portion of lengths represented in the catch and find the mean 
-  # weight at length
-  mutate(PropLen = NBRE_IN/Total_N, 
+           len.bin) %>% 
+  mutate(NBRE_bin = n(),
+         WGHT_bin = sum(as.numeric(weight))) %>%
+  ungroup() %>% 
+  # Determine portion of lengths represented in the catch by length bin.
+  # Find the mean weight at length.
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, 
+           len.bin, geometry) %>% 
+  mutate(PropLen_bin = NBRE_bin/NBRE_samp, 
          TheoreticalWgt_i = (7.52e-06*((standard_length)^3.23))) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry, 
-           duration, LAT, LON) %>%
   # Take the proportion of the mean weight at length in the catch 
-  mutate(EstimatedWeight = sum(PropLen*TheoreticalWgt_i)*Total_N) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
+  mutate(EstimatedWeight = sum(PropLen_bin*TheoreticalWgt_i)*NBRE_samp) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry,
-           Total_N, duration, LAT, LON) %>%
-  #  Adjust the total weight (sampled + unsampled weight) based on the proportion
+  # Adjust the total weight (sampled + unsampled weight) based on the proportion
   # of mean weight at length
-  mutate(Correction.factor = sum(Total_W)/EstimatedWeight) %>%
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
+  mutate(Correction.factor = Total_W/EstimatedWeight) %>%
   ungroup() %>%
-  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry,
-           Total_N, duration, LAT, LON) %>%
   # Multiple the proportion of lengths represented in the catch by the adjusted
   # proportion of weight represented by length
-  mutate(CatchWeightLen = Total_N*PropLen*TheoreticalWgt_i*Correction.factor) %>%
-  ungroup()
-# View(Sardine)
+  group_by(cruise, ship, haul, equilibrium_time.pacific, collection, geometry) %>%
+  mutate(CatchWeightLen_bin =
+           NBRE_samp*PropLen_bin*TheoreticalWgt_i*Correction.factor) %>%
+  ungroup() %>%
+  distinct()
 
-range(Sardine$Total_W)
-# [1]0.0005 1559162.8353
-# View(Sardine)
+View(len.bins3)
+
+range(len.bins3$Total_W)
+# [1]0.0005 31819.6497
+
+range(len.bins3$CatchWeightLen_bin)
+# [1] 2.378489e-06  1.054911e+03
 
 ```
 
