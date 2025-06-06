@@ -209,8 +209,9 @@ LifeHistoryHaulCatch2 %>%
   mutate(key = paste(cruise, ship, haul, equilibrium_time.utc, sep = "")) %>%
   filter(key %in% test.sardine3$key & scientific_name == "Sardinops sagax") %>%
   fwrite(., paste(here(dir), "/Data", survey.path,
-                  "ATM.Survey.corresponding.table.entries.with.no.length.measure.csv", sep = ""),
-       sep = ",") 
+                  "ATM.Survey.corresponding.table.entries.with.no.length.measure.csv", 
+                  sep = ""),
+         sep = ",") 
 
 ```
 
@@ -783,6 +784,7 @@ Haul.weights.oth <- CatchWeightLengthPerHaul %>%
   group_by(collection, ship, haul, equilibrium_time.utc) %>% 
   mutate(#Simplify the names for uninterested species
          scientific_name = "Other",
+         is_random_sample = NA,
          # Set to zero because we only want this as a place holder
          Species_weight = 0, 
          # Set to zero because we only want this as a place holder
@@ -833,6 +835,9 @@ test.collections <- test.collections %>%
 unique(test.collections$quality.indic)
 # [1] 0
 
+unique(test.collections$scientific_name)
+# [1] "Sardinops sagax"
+
 # Since the collections were missed and there are no other discrepancies,
 # join back the data
 Clean.data2 <- rbind(test.collections, full.clean.dat)
@@ -843,7 +848,7 @@ fwrite(Clean.data2, paste(here(dir), "/Data", survey.path,
        sep = ",")
 
 dim(Clean.data2)
-# [1] 20713  34
+# [1] 20671  34
 
 ```
 
