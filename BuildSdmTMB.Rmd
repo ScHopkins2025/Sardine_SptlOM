@@ -13,11 +13,10 @@ output:
 rm(list=ls())
 gc()
 
-load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "visreg", 
-              "geodata", # To get coastlines 
-              "pROC", "here", "sdmTMB",#"sdmTMBextra", # for adding barrier mesh
-              "ggforce" # enables plot_anisotropy
-              )
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
+              "pROC", "here", "sdmTMB", "sdmTMBextra", 
+              "ggforce", # enables plot_anisotropy
+              "spatstat") # Get summary table for nearest neighbor
 
 install.lib <- load.lib[!load.lib %in% installed.packages()]
 
@@ -48,16 +47,16 @@ dat <- readRDS(paste(sdmDir, "/sardineTrainingData.rds", sep = ""))
 
 # Project data
 dat2 <- dat %>%
-  filter(Year > 2002 & survey == 'cps') %>% 
+  filter(yr > 2002 & survey == 'cps') %>% 
   distinct() %>%
-  group_by(Year) %>%
+  group_by(yr) %>%
   mutate(hauls = n_distinct(haul)) %>%
   ungroup() %>% 
-  select(Year,cruise, haul, lat, hauls) %>% 
+  select(yr, cruise, haul, lat, hauls) %>% 
   distinct()
-  View(dat2)
+# View(dat2)
 
-test2003 <- dat %>% filter(Year == 2003 & survey == 'cps')
+test2003 <- dat %>% filter(yr == 2003 & survey == 'cps')
 
 length(unique(test2003$haul))
 # [1] 41
@@ -74,6 +73,9 @@ There will likely be some hauls not previously accounted, but the number of haul
 areaTranBuffsum.polygons <- 
    read_sf(here(dir, "Data", "Shapefiles", "cluster.with.area.defs.shp"))
 #View(areaTranBuff.polygons)
+
+unique(areaTranBuffsum.polygons$Area_id)
+# [1]
 
 sort(unique(areaTranBuffsum.polygons$Area_id))
 # [1] 1 2 3 4 5
@@ -100,8 +102,7 @@ area2poly.dens <- areaTranBuffsum.polygons %>%
   mutate(YearMon = as.factor(YearMon)) %>%
   ungroup() %>%
   mutate(FID = row_number(.))
-
-View(area2poly.dens)
+# View(area2poly.dens)
 
 plotNormalHistogram(area2poly.dens$Density)
 range(area2poly.dens$Density)
@@ -116,7 +117,29 @@ range(area2poly.dens$Density)
 # Extract polygon centers
 area2poly.dens2 <- area2poly.dens %>%
   mutate(X = st_coordinates(st_centroid(.))[,1]/1000,
-         Y = st_coordinates(st_centroid(.))[,2]/1000)
+         Y = st_coordinates(st_centroid(.))[,2]/1000) %>%
+  st_drop_geometry()
+
+```
+
+# Test/train split: 16 years for training, 6 years for out-of-model testing
+
+```{r, split.data}
+
+tims <- data.frame("tim_stp" = unique(area2poly.dens2$tim_stp))
+
+set.seed(2)
+index <- sample(1:nrow(tims), round(0.75 * nrow(tims))) 
+
+# Create training set
+trainTimStep <- tims[index,]
+train <- subset(area2poly.dens2, tim_stp %in% trainTimStep) 
+table(train$tim_stp) 
+
+# Create test set
+testTimStep <- tims[-index,]
+test <- subset(area2poly.dens2, tim_stp %in% testTimStep) 
+table(test$tim_stp)
 
 ```
 
@@ -133,22 +156,111 @@ Important: cannot use anisotropy with barrier mesh (see warning when run sdmTMB)
 # Read full resolution - Continental land masses and ocean islands, except Antarctica.
 land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "gshhg-shp-2.3.7",
                              "GSHHS_shp", "f", "GSHHS_f_L1.shp")) %>%
-  st_transform(crs = st_crs(area2poly.dens2))
+  # Project to same coordinate system
+  st_transform(crs = st_crs(area2poly.dens)) %>%
+  # Trim to area extent
+  st_crop(st_bbox(area2poly.dens))
 
-plot(land.barrier)                        
+plot(land.barrier)
+
+# Filter geometry type
+land.barrier <- land.barrier[st_geometry_type(land.barrier) %in%
+                               c("POLYGON", "MULTIPOLYGON"), ] %>%
+  st_union()
+
+# Wrap back into sf object
+land.barrier <- st_sf(geometry = land.barrier)
+
+# Check that union worked
+st_is_valid(land.barrier)
+# [1] TRUE
+
+# Drop levels
+land.barrier <- land.barrier %>% mutate(across(where(is.factor), droplevels))
+
+# Get summary table for nearest neighbor
+coords <- cbind(train$X, train$Y)
+nn_dist <- nndist(coords)
+summary(nn_dist)
+
+# Set cut-toff to 2/3 distance (mean or median - choose median if strong outliers)
+## This is informed by the SPDE theory about mesh resolution relative to
+## spatial range (from Lindgren et al. 2011 and related papers) -- to read ## more thoroughly
+
+cutoff <- median(nn_dist)*(2/3)
+cutoff
                         
-mesh <- make_mesh(area2poly.dens2, xy_cols = c("X", "Y"), cutoff = 75, 
-                  barrier_sf = land.barrier)  
+meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = cutoff) 
+
+barrier <- add_barrier_mesh(meshTrain, land.barrier, proj_scaling = 1000)
+
+# Example plot code from ?add_barrier_mesh
+mesh_df_water <- barrier$mesh_sf[barrier$normal_triangles, ]
+mesh_df_land <- barrier$mesh_sf[barrier$barrier_triangles, ]
+
+Mesh.with.barrier <-
+ggplot() +
+  geom_sf(data = land.barrier) +
+  geom_sf(data = mesh_df_water, size = 1, colour = "blue") +
+  geom_sf(data = mesh_df_land, size = 1, colour = "green")
+
+Mesh.with.barrier
+
+ggsave2(filename=paste("Mesh.with.barrier.jpeg",sep=''),
+        plot=Mesh.with.barrier, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+plot(barrier)
+points(train$X, train$Y, col = "red", pch = 19, 
+       cex = 0.2)
 
 ```
 
 # Now build the models:
 
-```{r}
+```{r, make.base.model}
+
+set.seed(1)
+
+# Add an ID column to track rows
+train$row_id <- seq_len(nrow(train))
+
+fit0 <- sdmTMB(Density ~ Year + Month + Area_id, 
+               data = train, 
+               spatial = "off", 
+               family = tweedie(link = "log"), 
+               anisotropy = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit0)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+
+dropped_ids <- setdiff(train$row_id, fit0$row_id)
+train[dropped_ids, ]
+
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain0 <- predict(fit0, newdata = train, type = "response")
+
+pTest0 <- predict(fit0, newdata = test, type = "response")
 
 ```
 
 
+
+# Now build the models: I built one with spatiotemporal effects, and one with none
+set.seed(1)
+fit0 <- sdmTMB(sardPA ~ s(sst) + s(zoo50) + s(ssb, k = 3), 
+               data = train, spatial = "off", 
+               family = binomial(link = "logit"), anisotropy = FALSE)
 
 # Now build the models: I built one with spatiotemporal effects, and one with none
 set.seed(1)

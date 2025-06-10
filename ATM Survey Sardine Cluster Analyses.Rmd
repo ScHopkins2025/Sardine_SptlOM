@@ -1654,6 +1654,8 @@ best_match <- intersections %>%
 areaTranBuffsum.polygons <- areaTranBuffsum.new %>%
   left_join(best_match, by = c("date", "clstGRP"))
 
+unique(areaTranBuffsum.polygons$Area_id)
+
 sort(unique(areaTranBuffsum.polygons$Area_id))
 # [1] 1 2 3 4 5
 # View(areaTranBuffsum.new)
