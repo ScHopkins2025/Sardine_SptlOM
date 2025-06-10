@@ -1,0 +1,183 @@
+---
+title: "BuildSdmTMB"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    
+---
+
+```{r setup, include=FALSE}
+
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "visreg", 
+              "geodata", # To get coastlines 
+              "pROC", "here", "sdmTMB",#"sdmTMBextra", # for adding barrier mesh
+              "ggforce" # enables plot_anisotropy
+              )
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+sf_use_s2(FALSE)
+
+# remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
+
+dir <- here(getwd())
+
+```
+
+# Load previous sdm data
+
+Build new adult sardine SDM using environmental predictors from the 3km WC15 ROMS.
+Vars are SST, surface chl-a, upper 50m zooplankton biomass, SSB. 
+Chl-a didn't improve AUC, dropped for now.
+
+```{r, load.previous.dat}
+
+# Where previous data is stored
+sdmDir <- here(dir, "Data", "Previous.sdmTMB.Data")
+
+# Load data
+dat <- readRDS(paste(sdmDir, "/sardineTrainingData.rds", sep = ""))
+
+# Project data
+dat2 <- dat %>%
+  filter(Year > 2002 & survey == 'cps') %>% 
+  distinct() %>%
+  group_by(Year) %>%
+  mutate(hauls = n_distinct(haul)) %>%
+  ungroup() %>% 
+  select(Year,cruise, haul, lat, hauls) %>% 
+  distinct()
+  View(dat2)
+
+test2003 <- dat %>% filter(Year == 2003 & survey == 'cps')
+
+length(unique(test2003$haul))
+# [1] 41
+# View(test2003)
+
+```
+
+# Load new sdm data
+
+There will likely be some hauls not previously accounted, but the number of hauls should be similar. Use 2003 as a test run.
+
+```{r, load.new.dat}
+
+areaTranBuffsum.polygons <- 
+   read_sf(here(dir, "Data", "Shapefiles", "cluster.with.area.defs.shp"))
+#View(areaTranBuff.polygons)
+
+sort(unique(areaTranBuffsum.polygons$Area_id))
+# [1] 1 2 3 4 5
+
+areaTranBuff.polygons.2003 <- areaTranBuffsum.polygons %>%
+  filter(Year == 2003)
+
+colnames(areaTranBuffsum.polygons)
+
+```
+
+# Create density estimates to be used for biomass abundance indices
+
+Note that here we want to include the absence data and are not concerned by lengths
+
+```{r, biomass.density.area2}
+
+area2poly.dens <- areaTranBuffsum.polygons %>%
+  group_by(Year, Month, Day, tim_stp, clstGRP, Hauls, NbClust, Area_id, Area_km2,
+           geometry) %>%
+  summarise(WGHT_bin = sum(WGHT_bin), .groups = "keep") %>%
+  mutate(Density = WGHT_bin/Area_km2, 
+         YearMon = paste0(Year, "-", sprintf("%s", Month))) %>%
+  mutate(YearMon = as.factor(YearMon)) %>%
+  ungroup() %>%
+  mutate(FID = row_number(.))
+
+View(area2poly.dens)
+
+plotNormalHistogram(area2poly.dens$Density)
+range(area2poly.dens$Density)
+# [1] 0.000 1621.613
+
+```
+
+# Extract polygon centers
+
+```{r, area2.mesh.prestep}
+
+# Extract polygon centers
+area2poly.dens2 <- area2poly.dens %>%
+  mutate(X = st_coordinates(st_centroid(.))[,1]/1000,
+         Y = st_coordinates(st_centroid(.))[,2]/1000)
+
+```
+
+# Next construct the mesh: 
+
+see https://pbs-assess.github.io/sdmTMB/articles/basic-intro.html: cutoff is in the units of X and Y (km here), represents minimum distance between knots before a new mesh vertex is added). Muhling et al., 2025 tried a bunch of cutoff values, and chose one that 1) had good out-of-sample predictability, and 2) wasn't too "blocky". They found Values between ~ 50 and 200 were fairly reasonable. 
+
+Note that in the new version of sdmTMB you should directly add the barrier file when creating the mesh rather than doing this in sdmTMBextra. Furthermore, if you are estimating spatial predictors over the full range of data, do not use a training subset.
+
+Important: cannot use anisotropy with barrier mesh (see warning when run sdmTMB).
+
+```{r, construct.mesh}
+
+# Read full resolution - Continental land masses and ocean islands, except Antarctica.
+land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "gshhg-shp-2.3.7",
+                             "GSHHS_shp", "f", "GSHHS_f_L1.shp")) %>%
+  st_transform(crs = st_crs(area2poly.dens2))
+
+plot(land.barrier)                        
+                        
+mesh <- make_mesh(area2poly.dens2, xy_cols = c("X", "Y"), cutoff = 75, 
+                  barrier_sf = land.barrier)  
+
+```
+
+# Now build the models:
+
+```{r}
+
+```
+
+
+
+# Now build the models: I built one with spatiotemporal effects, and one with none
+set.seed(1)
+fit0 <- sdmTMB(sardPA ~ s(sst) + s(zoo50) + s(ssb, k = 3), 
+               data = train, spatial = "off", 
+               family = binomial(link = "logit"), anisotropy = FALSE)
+set.seed(1)
+fit1 <- sdmTMB(sardPA ~ s(sst) + s(zoo50) + s(ssb, k = 3), 
+               data = train, mesh = mesh2, time = "mo", spatiotemporal = "ar1", 
+               family = binomial(link = "logit"), anisotropy = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit0) # ln_smooth_sigma warning ~ means that you have presences and absences in the same polygon
+sanity(fit1) # (Which I'm ok with in this context: otherwise you have ~ 1 polygon per trawl)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain0 <- predict(fit0, newdata = train, type = "response")
+pTest0 <- predict(fit0, newdata = test, type = "response")
+pTrain1 <- predict(fit1, newdata = train, type = "response")
+pTest1 <- predict(fit1, newdata = test, type = "response")
+# Overall AUCs for test and train 
+auc(pTrain0$sardPA, pTrain0$est, direction = "<", quiet = TRUE) # 0.7105
+auc(pTest0$sardPA, pTest0$est, direction = "<", quiet = TRUE) # 0.6957
+auc(pTrain1$sardPA, pTrain1$est, direction = "<", quiet = TRUE) # 0.8189 ST
+auc(pTest1$sardPA, pTest1$est, direction = "<", quiet = TRUE) # 0.7349 ST
+
+# Partial plots. Could make nicer later
+# SST
+sstPartial0 <- visreg(fit0, xvar = "sst", gg = TRUE)
+sstPartial0 
+sstPartial1 <- visreg(fit1, xvar = "sst", gg = TRUE)
+sstPartial1

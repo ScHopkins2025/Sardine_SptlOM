@@ -1663,7 +1663,8 @@ areaTranBuffsum.polygons <- areaTranBuffsum.polygons %>%
   separate(date, into = c("Year", "Month", "Day"))
 
 write_sf(areaTranBuffsum.polygons, 
-        file.path(paste(dir, "/Data/Shapefiles/cluster.with.area.defs.shp", sep="")),
+        file.path(paste(dir, "/Data/Shapefiles/cluster.with.area.defs.shp",
+                        sep="")),
         overwrite = TRUE)
 
 ```
