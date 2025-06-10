@@ -1504,7 +1504,7 @@ st_transform(areaTranBuffsum.new, crs = 4326) %>% st_bbox()
 #-------------------------------------------------------------------------------
 
 xmin = -134.11630 # CUFES boundary
-ymin =  28.65039  # CPS boundary
+ymin =  28.5      # Artificial boundary
 xmax = -114.0     # Artificial boundary
 ymax = 54.74310   # CUFES boundary
 
@@ -1655,6 +1655,7 @@ areaTranBuffsum.polygons <- areaTranBuffsum.new %>%
   left_join(best_match, by = c("date", "clstGRP"))
 
 unique(areaTranBuffsum.polygons$Area_id)
+# [1] 1 2 3 4 5
 
 sort(unique(areaTranBuffsum.polygons$Area_id))
 # [1] 1 2 3 4 5
@@ -1717,9 +1718,6 @@ Clusters.sdmTMB <-
   geom_sf(data = areaTranBuff.polygons.wgs84, fill = "black", col = "black") +
   labs(y = "Latitude")
 
-# plot(st_geometry(bbox.frame), border = 'blue')
-# plot(st_geometry(areaTranBuff.polygons), border = 'red', add = TRUE)
-
 Clusters.sdmTMB 
 
 ggsave2(filename=paste("CPS.ATM.Survey.Clusters.w.Area.Defs.jpeg",sep=''),
@@ -1728,3 +1726,4 @@ ggsave2(filename=paste("CPS.ATM.Survey.Clusters.w.Area.Defs.jpeg",sep=''),
         unit="cm", limitsize = FALSE)
 
 ```
+
