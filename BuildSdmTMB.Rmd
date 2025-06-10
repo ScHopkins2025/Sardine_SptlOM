@@ -14,7 +14,7 @@ rm(list=ls())
 gc()
 
 load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
-              "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg"
+              "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg",
               "ggforce", # enables plot_anisotropy
               "spatstat") # Get summary table for nearest neighbor
 
@@ -99,9 +99,11 @@ area2poly.dens <- areaTranBuffsum.polygons %>%
   summarise(WGHT_bin = sum(WGHT_bin), .groups = "keep") %>%
   mutate(Density = WGHT_bin/Area_km2, 
          YearMon = paste0(Year, "-", sprintf("%s", Month))) %>%
-  mutate(YearMon = as.factor(YearMon)) %>%
+  mutate(YearMon.nm = as.numeric(as.Date(paste0(YearMon, "-01"), 
+                                         format = "%Y - %m - %d"))) %>%
   ungroup() %>%
-  mutate(FID = row_number(.))
+  mutate(FID = row_number(.)) %>%
+  select(-tim_stp)
 # View(area2poly.dens)
 
 plotNormalHistogram(area2poly.dens$Density)
@@ -126,20 +128,20 @@ area2poly.dens2 <- area2poly.dens %>%
 
 ```{r, split.data}
 
-tims <- data.frame("tim_stp" = unique(area2poly.dens2$tim_stp))
+tims <- data.frame("YearMon.nm" = unique(area2poly.dens2$YearMon.nm))
 
 set.seed(2)
 index <- sample(1:nrow(tims), round(0.75 * nrow(tims))) 
 
 # Create training set
 trainTimStep <- tims[index,]
-train <- subset(area2poly.dens2, tim_stp %in% trainTimStep) 
-table(train$tim_stp) 
+train <- subset(area2poly.dens2, YearMon.nm %in% trainTimStep) 
+table(train$YearMon.nm) 
 
 # Create test set
 testTimStep <- tims[-index,]
-test <- subset(area2poly.dens2, tim_stp %in% testTimStep) 
-table(test$tim_stp)
+test <- subset(area2poly.dens2, YearMon.nm %in% testTimStep) 
+table(test$YearMon.nm)
 
 ```
 
@@ -221,13 +223,20 @@ points(train$X, train$Y, col = "red", pch = 19,
 
 # Now build the models:
 
-```{r, make.base.model}
+## For a "Non-spatial" model without covars
+
+This is a test run to see if we can explain the distribution by discrete time and OM spatial area 
+
+```{r, make.base.nonsptl.model}
 
 set.seed(1)
 
-fit0 <- sdmTMB(Density ~ Year + Month + Area_id, 
-               data = train, 
+fit0 <- sdmTMB(Density ~ Area_id, 
+               data = train,
+               mesh = barrier,
+               time = "YearMon.nm",
                spatial = "off", 
+               extra_time = test$YearMon.nm,
                family = tweedie(link = "log"), 
                anisotropy = FALSE)
 
@@ -240,7 +249,8 @@ sanity(fit0)
 # ✔ No fixed-effect standard errors are NA
 # ✔ No standard errors look unreasonably large
 # ✔ No sigma parameters are < 0.01
-# ✔ No sigma parameters are > 100
+# ✖ `sigma_E` is larger than 100
+# ℹ Consider simplifying the model or adding priors
 
 summary(fit0)
 
@@ -248,19 +258,23 @@ summary(fit0)
 pTrain0 <- predict(fit0, newdata = train, type = "response")
 pTest0 <- predict(fit0, newdata = test, type = "response")
 
-
 # Overall R2 for test and train 
-summary(lm(Density ~ est, data = pTrain0))$r.squared # 0.2385033
-summary(lm(Density ~ est, data = pTest0))$r.squared # 0.00090351
+summary(lm(Density ~ est, data = pTrain0))$r.squared # 0.7934136
+summary(lm(Density ~ est, data = pTest0))$r.squared # 0.008610168
 
 # MAE
-mean(abs(pTrain0$Density - pTrain0$est)) # 24.98654
-mean(abs(pTest0$Density - pTest0$est)) # 62.75438
+mean(abs(pTrain0$Density - pTrain0$est)) # 10.36276
+mean(abs(pTest0$Density - pTest0$est)) # 11.8681
 
 mean(train$Density)
 # [1] 18.10529
 sd(train$Density)
 # [1] 91.00154
+
+mean(test$Density)
+# [1] 11.67489                                                                     
+sd(test$Density)
+# [1] 32.81762
 
 # Partial plots. Could make nicer later
 ## Area_id
@@ -269,42 +283,62 @@ Area_idPartial0
 
 ```
 
+## For a "Spatial" model without covars
 
+This is a test run to see if we can explain the distribution by spatialtemporal distribution.
 
-# Now build the models: I built one with spatiotemporal effects, and one with none
-set.seed(1)
-fit0 <- sdmTMB(sardPA ~ s(sst) + s(zoo50) + s(ssb, k = 3), 
-               data = train, spatial = "off", 
-               family = binomial(link = "logit"), anisotropy = FALSE)
+```{r, make.base.sptl.model}
 
-# Now build the models: I built one with spatiotemporal effects, and one with none
 set.seed(1)
-fit0 <- sdmTMB(sardPA ~ s(sst) + s(zoo50) + s(ssb, k = 3), 
-               data = train, spatial = "off", 
-               family = binomial(link = "logit"), anisotropy = FALSE)
-set.seed(1)
-fit1 <- sdmTMB(sardPA ~ s(sst) + s(zoo50) + s(ssb, k = 3), 
-               data = train, mesh = mesh2, time = "mo", spatiotemporal = "ar1", 
-               family = binomial(link = "logit"), anisotropy = FALSE)
+
+fit1 <- sdmTMB(Density ~ Area_id, 
+               data = train, 
+               mesh = barrier,
+               spatial = "on",
+               time = "YearMon.nm",
+               extra_time = test$YearMon.nm,
+               spatiotemporal = "ar1",
+               family = delta_gamma(), 
+               anisotropy = FALSE)
 
 # Check model skill, fit, and convergence
-sanity(fit0) # ln_smooth_sigma warning ~ means that you have presences and absences in the same polygon
-sanity(fit1) # (Which I'm ok with in this context: otherwise you have ~ 1 polygon per trawl)
+sanity(fit1)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✖ No sigma parameters are > 100
+
+summary(fit1)
 
 # Predict (gives a whole new df, unlike GAM)
-pTrain0 <- predict(fit0, newdata = train, type = "response")
-pTest0 <- predict(fit0, newdata = test, type = "response")
 pTrain1 <- predict(fit1, newdata = train, type = "response")
 pTest1 <- predict(fit1, newdata = test, type = "response")
-# Overall AUCs for test and train 
-auc(pTrain0$sardPA, pTrain0$est, direction = "<", quiet = TRUE) # 0.7105
-auc(pTest0$sardPA, pTest0$est, direction = "<", quiet = TRUE) # 0.6957
-auc(pTrain1$sardPA, pTrain1$est, direction = "<", quiet = TRUE) # 0.8189 ST
-auc(pTest1$sardPA, pTest1$est, direction = "<", quiet = TRUE) # 0.7349 ST
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain1))$r.squared # 0.7182932
+summary(lm(Density ~ est, data = pTest1))$r.squared # 0.00090351
+
+# MAE
+mean(abs(pTrain1$Density - pTrain1$est)) # 15.36969
+mean(abs(pTest1$Density - pTest1$est)) # 14.27339
+
+mean(train$Density)
+# [1] 18.10529                                                                     
+sd(train$Density)
+# [1] 91.00154
+
+mean(test$Density)
+# [1] 11.67489                                                                     
+sd(test$Density)
+# [1] 32.81762
 
 # Partial plots. Could make nicer later
-# SST
-sstPartial0 <- visreg(fit0, xvar = "sst", gg = TRUE)
-sstPartial0 
-sstPartial1 <- visreg(fit1, xvar = "sst", gg = TRUE)
-sstPartial1
+## Area_id
+Area_idPartial1 <- visreg(fit1, xvar = "Area_id", gg = TRUE)
+Area_idPartial1 
+
+```
