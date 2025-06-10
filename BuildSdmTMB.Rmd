@@ -14,7 +14,7 @@ rm(list=ls())
 gc()
 
 load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
-              "pROC", "here", "sdmTMB", "sdmTMBextra", 
+              "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg"
               "ggforce", # enables plot_anisotropy
               "spatstat") # Get summary table for nearest neighbor
 
@@ -75,7 +75,7 @@ areaTranBuffsum.polygons <-
 #View(areaTranBuff.polygons)
 
 unique(areaTranBuffsum.polygons$Area_id)
-# [1]
+# [1] 2 3 4 5 1
 
 sort(unique(areaTranBuffsum.polygons$Area_id))
 # [1] 1 2 3 4 5
@@ -189,8 +189,10 @@ summary(nn_dist)
 
 cutoff <- median(nn_dist)*(2/3)
 cutoff
-                        
-meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = cutoff) 
+
+# Use previous study, cuttoff method above was likely overfitting
+## Note both were run on a non-sptl model and returned the same results
+meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = 75) 
 
 barrier <- add_barrier_mesh(meshTrain, land.barrier, proj_scaling = 1000)
 
@@ -223,9 +225,6 @@ points(train$X, train$Y, col = "red", pch = 19,
 
 set.seed(1)
 
-# Add an ID column to track rows
-train$row_id <- seq_len(nrow(train))
-
 fit0 <- sdmTMB(Density ~ Year + Month + Area_id, 
                data = train, 
                spatial = "off", 
@@ -243,14 +242,30 @@ sanity(fit0)
 # ✔ No sigma parameters are < 0.01
 # ✔ No sigma parameters are > 100
 
-dropped_ids <- setdiff(train$row_id, fit0$row_id)
-train[dropped_ids, ]
-
+summary(fit0)
 
 # Predict (gives a whole new df, unlike GAM)
 pTrain0 <- predict(fit0, newdata = train, type = "response")
-
 pTest0 <- predict(fit0, newdata = test, type = "response")
+
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain0))$r.squared # 0.2385033
+summary(lm(Density ~ est, data = pTest0))$r.squared # 0.00090351
+
+# MAE
+mean(abs(pTrain0$Density - pTrain0$est)) # 24.98654
+mean(abs(pTest0$Density - pTest0$est)) # 62.75438
+
+mean(train$Density)
+# [1] 18.10529
+sd(train$Density)
+# [1] 91.00154
+
+# Partial plots. Could make nicer later
+## Area_id
+Area_idPartial0 <- visreg(fit0, xvar = "Area_id", gg = TRUE)
+Area_idPartial0 
 
 ```
 
