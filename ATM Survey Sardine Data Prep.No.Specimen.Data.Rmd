@@ -26,6 +26,11 @@ survey.path <- "/Survey.Data/"
 
 source("~/Final.OM.spatial.structure/functions.R")
 
+# Turn off s2 and use
+# geos since you are computing
+# distance
+sf_use_s2(FALSE)
+
 ```
 
 # Load unmatched original and cleaned data
@@ -121,8 +126,9 @@ To avoid counting data twice, remove collections where entries exist and don't.
 # From initial data filtering and cleaning
 Cleaned.data2.b <- Cleaned.data2 %>%
   filter(!collection %in% original.collections.prestep)
+
 dim(Cleaned.data2.b)
-# [1] 20447 34
+# [1] 20405 34
 
 # From data with missing values
 missing.dat.b <- missing.dat %>%
@@ -276,14 +282,10 @@ Here columns are added similar to the absence data, and spatial columns in the i
 new.cols <- Cleaned.data2.b %>% select(c(2:3,5,9,14:15,17:22)) %>% names()
 new.cols
 
-# Since latitude and longitude correspond to starting position, 
-# copy those values in the new missing.coll.pres data
 missing.coll.pres <- missing.coll.pres %>%
-  mutate(longitude = start_longitude,
-         latitude = start_latitude,
-         quality.indic = 0,
-         
-         ) %>%
+  mutate(quality.indic = 0,
+         longitude = NA,
+         latitude = NA) %>%
   distinct() %>%
   mutate(# For FID, apply sequence from 
          # max FID value in Cleaned.data2.b
@@ -302,6 +304,10 @@ Match corresponding length frequency data by time and space
 
 ```{r, Check.spatial.temporal.distance}
 
+# Since the data falls within two UTM zones and there is not an ideal projection to use, 
+# apply a custom equal area albers projection
+aea_custom <- "+proj=aea +lat_1=30 +lat_2=50 +lat_0=40 +lon_0=-124.5 +datum=WGS84 +units=m +no_defs"
+
 # Create transect data
 targetDat_sf <- make_transect_sf(missing.coll.pres) %>%
   mutate(DatSource = "target") %>%
@@ -311,7 +317,7 @@ targetDat_sf <- make_transect_sf(missing.coll.pres) %>%
   # Create a single group id and assign it to all rows in that group
   mutate(key = cur_group_id()) %>%
   ungroup() %>%
-  st_transform(., crs = 5070)
+  st_transform(., crs = aea_custom)
 
 unique(is.na(targetDat_sf))
 
@@ -332,7 +338,7 @@ knownDat_sf <- Cleaned.data2.b.temp %>%
   select(key, cruise, collection, ship, haul, equilibrium_time.utc, geometry) %>%
   distinct() %>% 
   mutate(DatSource = "source") %>%
-  st_transform(., crs = 5070)
+  st_transform(., crs = aea_custom)
 
 unique(is.na(knownDat_sf))
 
