@@ -97,13 +97,17 @@ Note that here we want to include the absence data and are not concerned by leng
 area2poly.dens <- areaTranBuffsum.polygons %>%
   group_by(Year, Month, Day, tim_stp, clstGRP, Hauls, NbClust, Area_id, Area_km2,
            geometry) %>%
+  # Sum over length bins for each cluster
   summarise(WGHT_bin = sum(WGHT_bin), .groups = "keep") %>%
-  mutate(Density = WGHT_bin/Area_km2, 
+  # Crate a density variable
+  mutate(Density = WGHT_bin/Area_km2,
+         # Create a grouping variable
          YearMon = paste0(Year, "-", sprintf("%s", Month))) %>%
   mutate(YearMon.nm = as_datetime(paste0(YearMon, "-01"), 
                               format = "%Y - %m - %d", 
                               tz = "America/Los_Angeles")) %>%
   ungroup() %>%
+  # Assign unique row
   mutate(FID = row_number(.)) %>%
   select(-tim_stp)
 # View(area2poly.dens)
@@ -133,7 +137,7 @@ area2poly.dens2 <- area2poly.dens %>%
 tims <- data.frame("YearMon.nm" = sort(unique(area2poly.dens2$YearMon.nm)))
 
 # Single split: 75% train, last 3 time points as test
-split <- time_series_split(
+split <- timetk::time_series_split(
   tims,
   date_var = YearMon.nm,
   initial = floor(0.75 * nrow(tims)),
@@ -158,7 +162,7 @@ table(test$YearMon.nm)
 
 see https://pbs-assess.github.io/sdmTMB/articles/basic-intro.html: cutoff is in the units of X and Y (km here), represents minimum distance between knots before a new mesh vertex is added). Muhling et al., 2025 tried a bunch of cutoff values, and chose one that 1) had good out-of-sample predictability, and 2) wasn't too "blocky". They found Values between ~ 50 and 200 were fairly reasonable. 
 
-Note that in the new version of sdmTMB you should directly add the barrier file when creating the mesh rather than doing this in sdmTMBextra. Furthermore, if you are estimating spatial predictors over the full range of data, do not use a training subset.
+Here we look at the distance between clusters to assign knots using the summary function.
 
 Important: cannot use anisotropy with barrier mesh (see warning when run sdmTMB).
 
@@ -193,18 +197,29 @@ land.barrier <- land.barrier %>% mutate(across(where(is.factor), droplevels))
 coords <- cbind(train$X, train$Y)
 nn_dist <- nndist(coords)
 summary(nn_dist)
+#   Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# 0.4631   4.8171   8.6841  11.2030  13.9212 163.6689 
 
-# Set cut-toff to 2/3 distance (mean or median - choose median if strong outliers)
+# Set cut-toff to 1 + 2/3 distance (mean or median - choose median if strong outliers)
 ## This is informed by the SPDE theory about mesh resolution relative to
-## spatial range (from Lindgren et al. 2011 and related papers) -- to read ## more thoroughly
-
-cutoff <- median(nn_dist)*(2/3)
+## spatial range (check Lindgren et al. 2011 and related papers)
+cutoff <- round(median(nn_dist) + median(nn_dist)*(2/3))
 cutoff
 
-# Use previous study, cuttoff method above was likely overfitting
-## Note both were run on a non-sptl model and returned the same results
+# Cutoff values control the minimum distance between knots.
+## It is generally better to start with a coarser mesh (larger cutoff)
+## However there is a tradeoff on spatial predictability (more knots) and
+## over fitting the time to process. If the day is irregularly distributed
+## you can also try residual-based knot placement
 meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = cutoff) 
 
+# Check number of mesh nodes 
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(mesh$mesh$loc[,1])
+
+# proj_scaling should match units of (since we are working in m, but density
+# is in km, divide by 1000)
 barrier <- add_barrier_mesh(meshTrain, land.barrier, proj_scaling = 1000)
 
 # Example plot code from ?add_barrier_mesh
@@ -240,12 +255,16 @@ This is a test run to see if we can explain the distribution by discrete time an
 
 set.seed(1)
 
-fit0 <- sdmTMB(Density ~ Area_id, 
+fit0 <- sdmTMB(Density ~ 1 + Area_id, 
                data = train,
                mesh = barrier,
-               time = "YearMon.nm",
+               # Fit model by year and month
+               time = "YearMon.nm2",
+               # Use "ar1" if you expect temporal autocorrelation
+               # Otherwise, use default "rw"
+               spatiotemporal = "ar1",
                spatial = "off", 
-               extra_time = test$YearMon.nm,
+               extra_time = test$YearMon.nm2,
                family = tweedie(link = "log"), 
                anisotropy = FALSE)
 
@@ -301,7 +320,7 @@ This is a test run to see if we can explain the distribution by spatialtemporal 
 
 set.seed(1)
 
-fit1 <- sdmTMB(Density ~ Area_id, 
+fit1 <- sdmTMB(Density ~ 1 + Area_id, 
                data = train, 
                mesh = barrier,
                spatial = "on",
