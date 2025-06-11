@@ -16,7 +16,8 @@ gc()
 load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
               "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg",
               "ggforce", # enables plot_anisotropy
-              "spatstat") # Get summary table for nearest neighbor
+              "spatstat",# Get summary table for nearest neighbor
+              "rsample", "timetk") 
 
 install.lib <- load.lib[!load.lib %in% installed.packages()]
 
@@ -99,8 +100,9 @@ area2poly.dens <- areaTranBuffsum.polygons %>%
   summarise(WGHT_bin = sum(WGHT_bin), .groups = "keep") %>%
   mutate(Density = WGHT_bin/Area_km2, 
          YearMon = paste0(Year, "-", sprintf("%s", Month))) %>%
-  mutate(YearMon.nm = as.numeric(as.Date(paste0(YearMon, "-01"), 
-                                         format = "%Y - %m - %d"))) %>%
+  mutate(YearMon.nm = as_datetime(paste0(YearMon, "-01"), 
+                              format = "%Y - %m - %d", 
+                              tz = "America/Los_Angeles")) %>%
   ungroup() %>%
   mutate(FID = row_number(.)) %>%
   select(-tim_stp)
@@ -128,19 +130,26 @@ area2poly.dens2 <- area2poly.dens %>%
 
 ```{r, split.data}
 
-tims <- data.frame("YearMon.nm" = unique(area2poly.dens2$YearMon.nm))
+tims <- data.frame("YearMon.nm" = sort(unique(area2poly.dens2$YearMon.nm)))
 
-set.seed(2)
-index <- sample(1:nrow(tims), round(0.75 * nrow(tims))) 
+# Single split: 75% train, last 3 time points as test
+split <- time_series_split(
+  tims,
+  date_var = YearMon.nm,
+  initial = floor(0.75 * nrow(tims)),
+  assess = ceiling(0.25 * nrow(tims))
+)
 
 # Create training set
-trainTimStep <- tims[index,]
-train <- subset(area2poly.dens2, YearMon.nm %in% trainTimStep) 
+train_dates <- rsample::training(split)
+train <- subset(area2poly.dens2, YearMon.nm %in% train_dates$YearMon.nm) %>%
+  mutate(YearMon.nm2 = as.numeric(YearMon.nm))
 table(train$YearMon.nm) 
 
 # Create test set
-testTimStep <- tims[-index,]
-test <- subset(area2poly.dens2, YearMon.nm %in% testTimStep) 
+test_dates  <- rsample::testing(split)
+test <- subset(area2poly.dens2, YearMon.nm %in% test_dates$YearMon.nm) %>%
+  mutate(YearMon.nm2 = as.numeric(YearMon.nm))
 table(test$YearMon.nm)
 
 ```
@@ -194,7 +203,7 @@ cutoff
 
 # Use previous study, cuttoff method above was likely overfitting
 ## Note both were run on a non-sptl model and returned the same results
-meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = 75) 
+meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = cutoff) 
 
 barrier <- add_barrier_mesh(meshTrain, land.barrier, proj_scaling = 1000)
 
@@ -251,6 +260,7 @@ sanity(fit0)
 # ✔ No sigma parameters are < 0.01
 # ✖ `sigma_E` is larger than 100
 # ℹ Consider simplifying the model or adding priors
+# ✔ Range parameter doesn't look unreasonably large
 
 summary(fit0)
 
@@ -259,22 +269,22 @@ pTrain0 <- predict(fit0, newdata = train, type = "response")
 pTest0 <- predict(fit0, newdata = test, type = "response")
 
 # Overall R2 for test and train 
-summary(lm(Density ~ est, data = pTrain0))$r.squared # 0.7934136
-summary(lm(Density ~ est, data = pTest0))$r.squared # 0.008610168
+summary(lm(Density ~ est, data = pTrain0))$r.squared # 0.8749693
+summary(lm(Density ~ est, data = pTest0))$r.squared # 0.001235628
 
 # MAE
-mean(abs(pTrain0$Density - pTrain0$est)) # 10.36276
-mean(abs(pTest0$Density - pTest0$est)) # 11.8681
+mean(abs(pTrain0$Density - pTrain0$est)) # 6.788811
+mean(abs(pTest0$Density - pTest0$est)) # 9.126628
 
 mean(train$Density)
-# [1] 18.10529
+# [1] 19.32284
 sd(train$Density)
-# [1] 91.00154
+# [1] 87.73338
 
 mean(test$Density)
-# [1] 11.67489                                                                     
+# [1] 9.020028                                                                  
 sd(test$Density)
-# [1] 32.81762
+# [1] 58.06881
 
 # Partial plots. Could make nicer later
 ## Area_id
@@ -295,8 +305,8 @@ fit1 <- sdmTMB(Density ~ Area_id,
                data = train, 
                mesh = barrier,
                spatial = "on",
-               time = "YearMon.nm",
-               extra_time = test$YearMon.nm,
+               time = "YearMon.nm2",
+               extra_time = test$YearMon.nm2,
                spatiotemporal = "ar1",
                family = delta_gamma(), 
                anisotropy = FALSE)
