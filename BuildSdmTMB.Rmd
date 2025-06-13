@@ -10,6 +10,9 @@ output:
 
 ```{r setup, include=FALSE}
 
+# Run first if not already installed
+# remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
+
 rm(list=ls())
 gc()
 
@@ -17,7 +20,7 @@ load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
               "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg",
               "ggforce", # enables plot_anisotropy
               "spatstat",# Get summary table for nearest neighbor
-              "rsample", "timetk") 
+              "rsample", "timetk", "zoo") 
 
 install.lib <- load.lib[!load.lib %in% installed.packages()]
 
@@ -25,8 +28,6 @@ for(lib in install.lib) install.packages(lib,dependencies=TRUE)
 sapply(load.lib,require,character=TRUE)
 
 sf_use_s2(FALSE)
-
-# remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
 
 dir <- here(getwd())
 
@@ -96,25 +97,42 @@ Note that here we want to include the absence data and are not concerned by leng
 
 area2poly.dens <- areaTranBuffsum.polygons %>%
   group_by(Year, Month, Day, tim_stp, clstGRP, Hauls, NbClust, Area_id, Area_km2,
-           geometry) %>%
-  # Sum over length bins for each cluster
-  summarise(WGHT_bin = sum(WGHT_bin), .groups = "keep") %>%
-  # Crate a density variable
-  mutate(Density = WGHT_bin/Area_km2,
-         # Create a grouping variable
-         YearMon = paste0(Year, "-", sprintf("%s", Month))) %>%
-  mutate(YearMon.nm = as_datetime(paste0(YearMon, "-01"), 
-                              format = "%Y - %m - %d", 
-                              tz = "America/Los_Angeles")) %>%
-  ungroup() %>%
-  # Assign unique row
-  mutate(FID = row_number(.)) %>%
+           geometry, age, len_bin) %>%
+  summarise(WghtLenBin = sum(WghtLenBin), .groups = "drop") %>%
+  mutate(
+    # Calculate density
+    Density = WghtLenBin / Area_km2,
+
+    # Create proper date object
+    Date = as.Date(paste(Year, Month, Day, sep = "-"), format = "%Y-%m-%d"),
+    
+    # Convert to numeric
+    Year = as.numeric(Year),
+    Month = as.numeric(Month),
+    Day = as.numeric(Day),
+
+    # Create YearQuarter
+    YearQuarter = as.yearqtr(Date),
+
+    # Extract numeric quarter
+    Quarter = case_when(
+      str_detect(YearQuarter, "Q1") ~ 1,
+      str_detect(YearQuarter, "Q2") ~ 2,
+      str_detect(YearQuarter, "Q3") ~ 3,
+      str_detect(YearQuarter, "Q4") ~ 4
+    ),
+
+    # Create numeric time step index from baseline year (e.g., 2003)
+    NumericQuarter = (Year - min(Year)) * 4 + Quarter,
+
+  ) %>%
   select(-tim_stp)
+
 # View(area2poly.dens)
 
 plotNormalHistogram(area2poly.dens$Density)
 range(area2poly.dens$Density)
-# [1] 0.000 1621.613
+# [1] 0.000 912149.7
 
 ```
 
@@ -130,31 +148,83 @@ area2poly.dens2 <- area2poly.dens %>%
 
 ```
 
+# Restructure data to include P/A
+
+```{r, presence.absence.col}
+
+
+Absent.dat <- area2poly.dens2 %>%
+  filter(is.na(age)) %>%
+  select(-c(age,len_bin)) %>%
+  mutate(PA = 0)
+
+Present.dat <- area2poly.dens2 %>%
+  filter(!is.na(age))
+
+Full.dat <- left_join(Present.dat, Absent.dat) %>%
+  mutate(FID = row_number())
+
+Full.dat$PA[is.na(Full.dat$PA)] <- 1
+# View(Full.dat)
+
+```
+
+# Find missing time steps
+
+```{r, missing.quarters}
+
+# Generate complete sequence
+full_seq <- data.frame(
+  YearQuarter = seq(min(Full.dat$YearQuarter), 
+                    max(Full.dat$YearQuarter), 
+                    by = 0.25)
+  )
+
+missing_qtrs <- full_seq %>%
+  anti_join(Full.dat, by = "YearQuarter") %>%
+  mutate(Year = as.numeric(substr(YearQuarter, 1, 4)),
+         Quarter = 
+           case_when(
+             str_detect(YearQuarter, "Q1") ~ 1,
+             str_detect(YearQuarter, "Q2") ~ 2,
+             str_detect(YearQuarter, "Q3") ~ 3,
+             str_detect(YearQuarter, "Q4") ~ 4
+             )
+    ) %>%
+  mutate(NumericQuarter = (Year - min(Year)) * 4 + Quarter) %>%
+  select(NumericQuarter)
+
+```
+
 # Test/train split: 16 years for training, 6 years for out-of-model testing
+
+Here you need to have a datetime object. But this will not be used in the model
 
 ```{r, split.data}
 
-tims <- data.frame("YearMon.nm" = sort(unique(area2poly.dens2$YearMon.nm)))
+tims <- data.frame("YearQuarter" = sort(unique(Full.dat$YearQuarter))) %>%
+  mutate(
+    YearQuarter = as.yearqtr(YearQuarter, format = "%Y Q%q")
+  ) %>%
+  arrange(YearQuarter)  # ensures sorted order
 
 # Single split: 75% train, last 3 time points as test
 split <- timetk::time_series_split(
   tims,
-  date_var = YearMon.nm,
+  date_var = YearQuarter,
   initial = floor(0.75 * nrow(tims)),
   assess = ceiling(0.25 * nrow(tims))
 )
 
 # Create training set
 train_dates <- rsample::training(split)
-train <- subset(area2poly.dens2, YearMon.nm %in% train_dates$YearMon.nm) %>%
-  mutate(YearMon.nm2 = as.numeric(YearMon.nm))
-table(train$YearMon.nm) 
+train <- subset(Full.dat, YearQuarter %in% train_dates$YearQuarter)
+tail(train$YearQuarter)
 
 # Create test set
 test_dates  <- rsample::testing(split)
-test <- subset(area2poly.dens2, YearMon.nm %in% test_dates$YearMon.nm) %>%
-  mutate(YearMon.nm2 = as.numeric(YearMon.nm))
-table(test$YearMon.nm)
+test <- subset(Full.dat, YearQuarter %in% test_dates$YearQuarter) 
+head(test$YearQuarter)
 
 ```
 
@@ -211,16 +281,22 @@ cutoff
 ## However there is a tradeoff on spatial predictability (more knots) and
 ## over fitting the time to process. If the day is irregularly distributed
 ## you can also try residual-based knot placement
-meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = cutoff) 
+meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = 50) 
 
 # Check number of mesh nodes 
 ## If greater than >1,000–2,000 nodes, 
 ## you’re likely in trouble unless you have a lot of RAM.
-length(mesh$mesh$loc[,1])
+length(meshTrain$mesh$loc[,1])
+# [1] 229
 
 # proj_scaling should match units of (since we are working in m, but density
 # is in km, divide by 1000)
 barrier <- add_barrier_mesh(meshTrain, land.barrier, proj_scaling = 1000)
+
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(barrier$mesh$loc[,1])
+# [1] 229
 
 # Example plot code from ?add_barrier_mesh
 mesh_df_water <- barrier$mesh_sf[barrier$normal_triangles, ]
@@ -233,6 +309,7 @@ ggplot() +
   geom_sf(data = mesh_df_land, size = 1, colour = "green")
 
 Mesh.with.barrier
+# [1] 231
 
 ggsave2(filename=paste("Mesh.with.barrier.jpeg",sep=''),
         plot=Mesh.with.barrier, device="jpeg", 
@@ -245,6 +322,32 @@ points(train$X, train$Y, col = "red", pch = 19,
 
 ```
 
+# Check for redundancy:
+
+
+```{r}
+
+
+X <- model.matrix(Density ~ 0 + as.factor(age) + as.factor(len_bin), data = train)
+library(caret)
+findLinearCombos(X)
+
+table(train$age)
+table(train$len_bin)
+
+#-------------------------------------------------------------------------------
+# Debug size constraint
+#-------------------------------------------------------------------------------
+
+#Identify hidden levels that may bog down the model
+sapply(train, function(x) if (is.factor(x)) nlevels(x))
+
+summary(dplyr::select_if(train, is.factor))
+
+#-------------------------------------------------------------------------------
+
+```
+
 # Now build the models:
 
 ## For a "Non-spatial" model without covars
@@ -253,22 +356,30 @@ This is a test run to see if we can explain the distribution by discrete time an
 
 ```{r, make.base.nonsptl.model}
 
-set.seed(1)
+set.seed(1) 
 
-fit0 <- sdmTMB(Density ~ 1 + Area_id, 
-               data = train,
+# Define extra time steps to estimate
+est.missing.time <- unique(c(missing_qtrs$NumericQuarter, test$NumericQuarter)) %>%
+  sort
+
+fit0 <- sdmTMB(Density ~ 1,
+               data = train, 
                mesh = barrier,
                # Fit model by year and month
-               time = "YearMon.nm2",
-               # Use "ar1" if you expect temporal autocorrelation
-               # Otherwise, use default "rw"
-               spatiotemporal = "ar1",
+               time = "NumericQuarter",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent per time step)
+               spatiotemporal = "off",
                spatial = "off", 
-               extra_time = test$YearMon.nm2,
-               family = tweedie(link = "log"), 
-               anisotropy = FALSE)
+               extra_time = est.missing.time,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               silent = FALSE)
+
 
 # Check model skill, fit, and convergence
+
 sanity(fit0)
 # ✔ Non-linear minimizer suggests successful convergence
 # ✔ Hessian matrix is positive definite
@@ -277,40 +388,169 @@ sanity(fit0)
 # ✔ No fixed-effect standard errors are NA
 # ✔ No standard errors look unreasonably large
 # ✔ No sigma parameters are < 0.01
-# ✖ `sigma_E` is larger than 100
-# ℹ Consider simplifying the model or adding priors
-# ✔ Range parameter doesn't look unreasonably large
+# ✔ No sigma parameters are > 100
 
 summary(fit0)
 
 # Predict (gives a whole new df, unlike GAM)
 pTrain0 <- predict(fit0, newdata = train, type = "response")
+
 pTest0 <- predict(fit0, newdata = test, type = "response")
 
 # Overall R2 for test and train 
-summary(lm(Density ~ est, data = pTrain0))$r.squared # 0.8749693
-summary(lm(Density ~ est, data = pTest0))$r.squared # 0.001235628
+summary(lm(Density ~ est, data = pTrain0))$r.squared # 0
+summary(lm(Density ~ est, data = pTest0))$r.squared # 0
 
 # MAE
-mean(abs(pTrain0$Density - pTrain0$est)) # 6.788811
-mean(abs(pTest0$Density - pTest0$est)) # 9.126628
+mean(abs(pTrain0$Density - pTrain0$est)) # 1304.142
+mean(abs(pTest0$Density - pTest0$est)) # 665.5521
 
 mean(train$Density)
-# [1] 19.32284
+# [1] 666.9524
 sd(train$Density)
-# [1] 87.73338
+# [1] 19792.58
 
 mean(test$Density)
-# [1] 9.020028                                                                  
+# [1] 2.688917                                                                  
 sd(test$Density)
-# [1] 58.06881
-
-# Partial plots. Could make nicer later
-## Area_id
-Area_idPartial0 <- visreg(fit0, xvar = "Area_id", gg = TRUE)
-Area_idPartial0 
+# [1] 42.18626
 
 ```
+
+## Try with temporal autocorrelation
+
+```{r, make.nonsptl.model1}
+
+set.seed(1) 
+
+fit1 <- sdmTMB(Density ~ 1,
+               data = train, 
+               mesh = barrier,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "NumericQuarter",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = est.missing.time,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+
+# Check model skill, fit, and convergence
+
+sanity(fit1)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✖ `ln_tau_E` gradient > 0.001
+# ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
+# ✖ `ln_phi` gradient > 0.001
+# ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✖ `sigma_E` is larger than 100
+# ℹ Consider simplifying the model or adding priors
+
+summary(fit1)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain1 <- predict(fit1, newdata = train, type = "response")
+
+pTest1 <- predict(fit1, newdata = test, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain1))$r.squared # 0.07398241
+summary(lm(Density ~ est, data = pTest1))$r.squared # 5.998492e-05
+
+# MAE
+mean(abs(pTrain1$Density - pTrain1$est)) # 1304.142
+mean(abs(pTest1$Density - pTest1$est)) # 665.5521
+
+mean(train$Density)
+# [1] 666.9524
+sd(train$Density)
+# [1] 19792.58
+
+mean(test$Density)
+# [1] 2.688917                                                                  
+sd(test$Density)
+# [1] 42.18626
+
+```
+
+## Try with length and age
+
+```{r, make.nonsptl.model2}
+
+set.seed(1) 
+
+# Add ran age and length random effects with temporal autocorrelation
+fit2 <- sdmTMB(Density ~ 0 + as.factor(age) + as.factor(len_bin),
+               data = train, 
+               mesh = barrier,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "NumericQuarter",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = est.missing.time,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+
+sanity(fit2)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✖ `ln_tau_E` gradient > 0.001
+# ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
+# ✖ `ln_phi` gradient > 0.001
+# ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✖ `sigma_E` is larger than 100
+# ℹ Consider simplifying the model or adding priors
+
+summary(fit2)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain2 <- predict(fit2, newdata = train, type = "response")
+
+pTest2 <- predict(fit2, newdata = test, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain2))$r.squared # 0.07398241
+summary(lm(Density ~ est, data = pTest2))$r.squared # 5.998492e-05
+
+# MAE
+mean(abs(pTrain2$Density - pTrain2$est)) # 1304.142
+mean(abs(pTest2Density - pTest2$est)) # 665.5521
+
+mean(train$Density)
+# [1] 666.9524
+sd(train$Density)
+# [1] 19792.58
+
+mean(test$Density)
+# [1] 2.688917                                                                  
+sd(test$Density)
+# [1] 42.18626
+
+```
+
 
 ## For a "Spatial" model without covars
 
@@ -320,15 +560,26 @@ This is a test run to see if we can explain the distribution by spatialtemporal 
 
 set.seed(1)
 
-fit1 <- sdmTMB(Density ~ 1 + Area_id, 
+fit1 <- sdmTMB(Density ~ 0 + as.factor(age) + as.factor(len_bin), 
                data = train, 
                mesh = barrier,
-               spatial = "on",
-               time = "YearMon.nm2",
-               extra_time = test$YearMon.nm2,
+               time_varying = ~ 1,
+               # Fit model by year and quarter
+               time = "NumericQuarter",
+               # Use "ar1" if you expect temporal autocorrelation
+               # Otherwise, use default "rw"
                spatiotemporal = "ar1",
-               family = delta_gamma(), 
+               spatial = "on", 
+               extra_time = est.missing.time,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
                anisotropy = FALSE)
+
+```
+
+```{r}
+
+```
 
 # Check model skill, fit, and convergence
 sanity(fit1)

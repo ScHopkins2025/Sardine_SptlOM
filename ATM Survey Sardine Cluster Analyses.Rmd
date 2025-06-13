@@ -10,6 +10,9 @@ output:
 
 ```{r setup, include=FALSE}
 
+# Install rnaturalearthhires if not installed already
+# devtools::install_github("ropensci/rnaturalearthhires")
+
 rm(list=ls())
 gc()
 
@@ -31,7 +34,7 @@ survey.path <- "/Survey.Data/"
 
 Figure.path <- "Figures/"
 
-source("~/Final.OM.spatial.structure/functions.R")
+source(paste0(dir,"/functions.R"))
 
 ```
 
@@ -987,7 +990,7 @@ area.transects.buff <- area.transects.buff %>%
             beginTransect, endTransect, subsample_count, subsample_weight,
             itis_tsn, remaining_weight, Species_weight))
 
-# Shorten the names
+# Shorten the names 
 names(area.transects.buff) <- c("cruise", "ship", "haul", "collection",
                                 "init_lat", "init_lon", "end_lat", "end_lon",
                                 "sciname", "weight", "specimen_i,", "length_cm",
