@@ -96,8 +96,12 @@ Note that here we want to include the absence data and are not concerned by leng
 ```{r, biomass.density.area2}
 
 area2poly.dens <- areaTranBuffsum.polygons %>%
-  group_by(Year, Month, Day, tim_stp, clstGRP, Hauls, NbClust, Area_id, Area_km2,
-           geometry, age, len_bin) %>%
+  mutate(Cruise = substr(keys,1,6)) %>%
+  group_by(Cruise, Year, Month, Day, tim_stp, clstGRP, Hauls, NbClust, Area_id,
+           Area_km2, geometry, age, len_bin) %>%
+  # Note that some clusters will have both presence and absence data
+  # but this will give you the proportion to apply in stock synthesis for length
+  # and age
   summarise(WghtLenBin = sum(WghtLenBin), .groups = "drop") %>%
   mutate(
     # Calculate density
@@ -150,26 +154,242 @@ area2poly.dens2 <- area2poly.dens %>%
 
 # Restructure data to include P/A
 
-```{r, presence.absence.col}
+First find mixed clusters where both presence and absence values exist. Filter out clusters that have only absence values.
 
+```{r, presence.absence.col.pt1}
 
+# Find steps where there are absence values within a cluster
 Absent.dat <- area2poly.dens2 %>%
   filter(is.na(age)) %>%
   select(-c(age,len_bin)) %>%
-  mutate(PA = 0)
+  # Add key to identify clusters
+  mutate(vals = paste0(Cruise, Date, clstGRP, Area_id, Area_km2, X, Y))
 
+dim(Absent.dat)
+# [1] 1282   18
+
+# Find steps where there are presence values within a cluster
 Present.dat <- area2poly.dens2 %>%
-  filter(!is.na(age))
+  filter(!is.na(age)) %>%
+  # Add presence binary value
+  mutate(PA = 1) %>%
+  # Add key to identify clusters
+  mutate(vals = paste0(Cruise, Date, clstGRP, Area_id, Area_km2, X, Y))
 
-Full.dat <- left_join(Present.dat, Absent.dat) %>%
-  mutate(FID = row_number())
+# Clusters with both presence and absence should be given a 1 indicating presence, 
+# and are but are accounted for in the density measure. 
+Absent.dat.mxd <- Absent.dat %>%
+  filter(vals %in% Present.dat$vals) %>%
+  # Add presence binary value
+  mutate(PA = 1)
 
-Full.dat$PA[is.na(Full.dat$PA)] <- 1
-# View(Full.dat)
+# Find steps where the entire clusters has no Sardines
+# These should be given a 0 binary value indicating total absence.
+Absent.dat.all <- Absent.dat %>%
+  filter(!vals %in% Present.dat$vals) %>%
+  # Add absence binary value
+  mutate(PA = 0)
 
 ```
 
-# Find missing time steps
+## For each bin in the presence data, split by age length bin
+
+Combine survey clusters with total absence and bin data so that for each cruise, there total absence clusters are appended.
+
+```{r, presence.absence.col.pt2}
+
+# Check that all Cruise values in Absent.dat.all are present in Present.dat
+unique(Absent.dat.all$Cruise) %in% unique(Present.dat$Cruise)
+#  [1]  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE FALSE
+# [14]  TRUE  TRUE  TRUE FALSE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE
+# [27]  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE
+
+#-------------------------------------------------------------------------------
+# Store cruises where there are no shared Cruises
+#-------------------------------------------------------------------------------
+
+Absent.matched.cruise <- Absent.dat.all %>%
+  filter(Cruise %in% Present.dat$Cruise)
+
+dim(Absent.matched.cruise)
+# [1] 1020   19   
+
+## Check if there is at least a shared Date
+Absent.matched.time <- Absent.matched.cruise %>%
+  filter(Date %in% Present.dat$Date)
+
+dim(Absent.matched.time)
+# [1] 181  19
+
+## Check if there is at least a shared Year and Month
+Absent.matched.yrmon <- Absent.matched.cruise %>%
+  filter(!Date %in% Present.dat$Date &
+           Year %in% Present.dat$Year &
+           Month %in% Present.dat$Month)
+
+dim(Absent.matched.yrmon)
+# [1] 839  19
+
+#-------------------------------------------------------------------------------
+# Store cruises where there are no shared Cruises
+#-------------------------------------------------------------------------------
+
+Absent.ToTunique <- Absent.dat.all %>%
+  filter(!Cruise %in% Present.dat$Cruise)
+
+dim(Absent.ToTunique)
+# [1] 44 19
+
+## Check if there is at least a shared Date
+Absent.ToTunique.date <- Absent.ToTunique %>%
+  filter(Date %in% Present.dat$Date)
+
+dim(Absent.ToTunique.date)
+# [1] 24 19
+
+## Check if there is at least a shared Year and Month
+Absent.ToTunique.yrmon <- Absent.ToTunique %>%
+  filter(!Date %in% Present.dat$Date &
+           Year %in% Present.dat$Year &
+           Month %in% Present.dat$Month)
+
+dim(Absent.ToTunique.yrmon)
+# [1] 20 19
+
+```
+
+## For shared Cruise and Date values, bind rows
+
+```{r, presence.absence.col.pt3.1}
+
+#-------------------------------------------------------------------------------
+# For when a shared date exists
+#-------------------------------------------------------------------------------
+
+# Define keys
+join_keys <- c("Cruise", "Date")
+
+cruise.date.dat <- Present.dat %>%
+  group_by(age, len_bin) %>%
+  group_split() %>%
+  map_df(~ {
+    present_grp <- .x
+
+    # Get rows from Absent.dat.all that match on Cruise
+    absent_matches <- Absent.matched.time %>%
+      filter(Cruise %in% Present.dat$Cruise & 
+               Date %in% Present.dat$Date) %>%
+      semi_join(present_grp, by = join_keys) %>%
+      mutate(age = unique(present_grp$age),
+         len_bin = unique(present_grp$len_bin))
+
+    # Append matched Absent rows to this group
+    bind_rows(present_grp, absent_matches)
+  })
+
+```
+
+## For shared Cruise and Year Month values, bind rows
+
+```{r, presence.absence.col.pt3.2}
+
+# Define keys
+join_keys <- c("Cruise", "Year", "Month")
+
+cruise.yrmon.dat <- Present.dat %>%
+  group_by(age, len_bin) %>%
+  group_split() %>%
+  map_df(~ {
+    present_grp <- .x
+
+    # Get rows from Absent.dat.all that match on Cruise
+    absent_matches <- Absent.matched.yrmon %>%
+      filter(Cruise %in% Present.dat$Cruise &
+               !Date %in% Present.dat$Date &
+               Year %in% Present.dat$Year &
+               Month %in% Present.dat$Month) %>%
+      semi_join(present_grp, by = join_keys) %>%
+      mutate(age = unique(present_grp$age),
+         len_bin = unique(present_grp$len_bin))
+
+    # Append matched Absent rows to this group
+    bind_rows(present_grp, absent_matches)
+  })
+
+```
+
+## For non-shared Cruise data and Date only, bind rows
+
+```{r, presence.absence.col.pt3.3}
+
+# Define keys
+join_keys <- c("Date")
+
+date.dat.only <- Present.dat %>%
+  group_by(age, len_bin) %>%
+  group_split() %>%
+  map_df(~ {
+    present_grp <- .x
+
+    # Get rows from Absent.dat.all that match on Cruise
+    absent_matches <- Absent.ToTunique.date %>%
+      filter(!Cruise %in% Present.dat$Cruise &
+               Date %in% Present.dat$Date) %>%
+      semi_join(present_grp, by = join_keys) %>%
+      mutate(age = unique(present_grp$age),
+         len_bin = unique(present_grp$len_bin))
+
+    # Append matched Absent rows to this group
+    bind_rows(present_grp, absent_matches)
+  })
+
+```
+
+## For non-shared Cruise data and Year Month only, bind rows
+
+```{r, presence.absence.col.pt3.4}
+
+# Define keys
+join_keys <- c("Year", "Month")
+
+yrmon.dat.only <- Present.dat %>%
+  group_by(age, len_bin) %>%
+  group_split() %>%
+  map_df(~ {
+    present_grp <- .x
+
+    # Get rows from Absent.dat.all that match on Cruise
+    absent_matches <- Absent.ToTunique.yrmon %>%
+      filter(!Cruise %in% Present.dat$Cruise &
+               !Date %in% Present.dat$Date &
+               Year %in% Present.dat$Year &
+               Month %in% Present.dat$Month) %>%
+      semi_join(present_grp, by = join_keys) %>%
+      mutate(age = unique(present_grp$age),
+         len_bin = unique(present_grp$len_bin))
+
+    # Append matched Absent rows to this group
+    bind_rows(present_grp, absent_matches)
+  })
+
+```
+
+## Join back everything
+
+```{r, join.full.data.presense.absence}
+
+Full.dat <- rbind(cruise.date.dat, cruise.yrmon.dat, date.dat.only, yrmon.dat.only) %>%
+  distinct() %>%
+  # Reorder chronologically
+  arrange(NumericQuarter) 
+
+summary(Full.dat)
+
+unique(Full.dat$PA)
+
+```
+
+## Find missing time steps
 
 ```{r, missing.quarters}
 
@@ -196,9 +416,9 @@ missing_qtrs <- full_seq %>%
 
 ```
 
-# Test/train split: 16 years for training, 6 years for out-of-model testing
+# Test/train split
 
-Here you need to have a datetime object. But this will not be used in the model
+Split 28 quarters (16 years) for training and 10 quarters (5 years) for out-of-model testing. For the time_series_split function, you need to have a datetime object. 
 
 ```{r, split.data}
 
@@ -324,7 +544,6 @@ points(train$X, train$Y, col = "red", pch = 19,
 
 # Check for redundancy:
 
-
 ```{r}
 
 
@@ -362,7 +581,10 @@ set.seed(1)
 est.missing.time <- unique(c(missing_qtrs$NumericQuarter, test$NumericQuarter)) %>%
   sort
 
-fit0 <- sdmTMB(Density ~ 1,
+## Add age and length fixed effects without temporal or spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin
+fit0 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin),
                data = train, 
                mesh = barrier,
                # Fit model by year and month
@@ -377,9 +599,7 @@ fit0 <- sdmTMB(Density ~ 1,
                anisotropy = FALSE,
                silent = FALSE)
 
-
 # Check model skill, fit, and convergence
-
 sanity(fit0)
 # ✔ Non-linear minimizer suggests successful convergence
 # ✔ Hessian matrix is positive definite
@@ -391,6 +611,8 @@ sanity(fit0)
 # ✔ No sigma parameters are > 100
 
 summary(fit0)
+#### Dispersion Parameter: 0.17 (Good, typical range: 0.5-1.5)
+#### ML Criterion: 9351.420 (Best used for model comparison, not absolute assessment)
 
 # Predict (gives a whole new df, unlike GAM)
 pTrain0 <- predict(fit0, newdata = train, type = "response")
@@ -398,32 +620,35 @@ pTrain0 <- predict(fit0, newdata = train, type = "response")
 pTest0 <- predict(fit0, newdata = test, type = "response")
 
 # Overall R2 for test and train 
-summary(lm(Density ~ est, data = pTrain0))$r.squared # 0
-summary(lm(Density ~ est, data = pTest0))$r.squared # 0
+summary(lm(Density ~ est, data = pTrain0))$r.squared # 0.005012378
+summary(lm(Density ~ est, data = pTest0))$r.squared # 1.401812e-05
 
 # MAE
-mean(abs(pTrain0$Density - pTrain0$est)) # 1304.142
-mean(abs(pTest0$Density - pTest0$est)) # 665.5521
+mean(abs(pTrain0$Density - pTrain0$est)) # 413.7007
+mean(abs(pTest0$Density - pTest0$est)) # 396.4788
 
 mean(train$Density)
-# [1] 666.9524
+# [1] 209.332
 sd(train$Density)
-# [1] 19792.58
+# [1] 11090.42
 
 mean(test$Density)
-# [1] 2.688917                                                                  
+# [1] 1.094451                                                                  
 sd(test$Density)
-# [1] 42.18626
+# [1] 28.57991
 
 ```
 
 ## Try with temporal autocorrelation
 
-```{r, make.nonsptl.model1}
+```{r, make.nonsptl.model}
 
 set.seed(1) 
 
-fit1 <- sdmTMB(Density ~ 1,
+## Add age and le ngth fixed effects with temporal autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin
+fit1 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin),
                data = train, 
                mesh = barrier,
                # Fit model by year and month
@@ -441,23 +666,45 @@ fit1 <- sdmTMB(Density ~ 1,
                # Show progress
                silent = FALSE)
 
-
 # Check model skill, fit, and convergence
-
 sanity(fit1)
 # ✔ Non-linear minimizer suggests successful convergence
 # ✔ Hessian matrix is positive definite
-# ✖ `ln_tau_E` gradient > 0.001
-# ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
-# ✖ `ln_phi` gradient > 0.001
-# ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
+# ✔ No extreme or very small eigenvalues detected
+##------------------------------------------------------------------------------
+## ✖ `ln_phi` gradient > 0.001
+## ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
+##
+#### `ln_phi` (often represented as the dispersion parameter) controls the variance of #### the error term in many models, especially in models like Generalized Linear Models #### (GLMs) or spatiotemporal models (e.g., sdmTMB).
+##
+#### ln_phi` gradient > 0.001 indicates that the log-likelihood with respect to the 
+#### ln_phi parameter is still changing significantly at the point where the model 
+#### converged.
+##------------------------------------------------------------------------------
 # ✔ No fixed-effect standard errors are NA
 # ✔ No standard errors look unreasonably large
 # ✔ No sigma parameters are < 0.01
-# ✖ `sigma_E` is larger than 100
-# ℹ Consider simplifying the model or adding priors
+##------------------------------------------------------------------------------
+## ✖ `sigma_E` is larger than 100
+## ℹ Consider simplifying the model or adding priors
+##
+#### Large values of sigma_E indicate that there is a high level of spatial 
+#### variation that your model has not explained. 
+##------------------------------------------------------------------------------
+# ✔ Range parameters don't look unreasonably large
 
 summary(fit1)
+## M1:
+#### Spatiotemporal AR1 correlation (rho): 0.10
+#### Matérn range: 75.12
+#### Spatiotemporal marginal AR1 SD: 615.42
+## M2:
+#### Dispersion Parameter: 0.45 (Good, typical range: 0.5-1.5)
+#### Spatiotemporal AR1 Correlation (rho): 0.67 (Moderate to strong, 
+## typical range: 0.4 - 0.8)
+#### Matérn Range: 122.28 (Good, typical range: 50-200 depending on scale)
+#### Spatiotemporal Marginal AR1 SD: 48.57 (Good, typical range: 10-50)
+#### ML Criterion: 4509.807 (Best used for model comparison, not absolute assessment)
 
 # Predict (gives a whole new df, unlike GAM)
 pTrain1 <- predict(fit1, newdata = train, type = "response")
@@ -465,33 +712,35 @@ pTrain1 <- predict(fit1, newdata = train, type = "response")
 pTest1 <- predict(fit1, newdata = test, type = "response")
 
 # Overall R2 for test and train 
-summary(lm(Density ~ est, data = pTrain1))$r.squared # 0.07398241
-summary(lm(Density ~ est, data = pTest1))$r.squared # 5.998492e-05
+summary(lm(Density ~ est, data = pTrain1))$r.squared # 0.1437345
+summary(lm(Density ~ est, data = pTest1))$r.squared # 8.934803e-05
 
 # MAE
-mean(abs(pTrain1$Density - pTrain1$est)) # 1304.142
-mean(abs(pTest1$Density - pTest1$est)) # 665.5521
+mean(abs(pTrain1$Density - pTrain1$est)) # 280.5764
+mean(abs(pTest1$Density - pTest1$est)) # 1.094452
 
 mean(train$Density)
-# [1] 666.9524
+# [1] 209.332
 sd(train$Density)
-# [1] 19792.58
+# [1] 11090.42
 
 mean(test$Density)
-# [1] 2.688917                                                                  
+# [1] 1.094451                                                                  
 sd(test$Density)
-# [1] 42.18626
+# [1] 28.57991
 
 ```
 
-## Try with length and age
+## Try with spatial effects
 
-```{r, make.nonsptl.model2}
+```{r, make.sptl.model}
 
 set.seed(1) 
 
-# Add ran age and length random effects with temporal autocorrelation
-fit2 <- sdmTMB(Density ~ 0 + as.factor(age) + as.factor(len_bin),
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit2 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin),
                data = train, 
                mesh = barrier,
                # Fit model by year and month
@@ -501,7 +750,7 @@ fit2 <- sdmTMB(Density ~ 0 + as.factor(age) + as.factor(len_bin),
                # Use "ar1" or "rw" if you expect temporal autocorrelation
                # Otherwise, use default "iid" (independent by time step)
                spatiotemporal = "ar1",
-               spatial = "off", 
+               spatial = "on", 
                extra_time = est.missing.time,
                # Fit hurdle model (first link is 0 or 1, second link is > 0)
                family = delta_gamma(link1 = "logit", link2 = "log"),
@@ -510,21 +759,53 @@ fit2 <- sdmTMB(Density ~ 0 + as.factor(age) + as.factor(len_bin),
                silent = FALSE)
 
 # Check model skill, fit, and convergence
-
 sanity(fit2)
 # ✔ Non-linear minimizer suggests successful convergence
 # ✔ Hessian matrix is positive definite
-# ✖ `ln_tau_E` gradient > 0.001
-# ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
-# ✖ `ln_phi` gradient > 0.001
-# ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
 # ✔ No fixed-effect standard errors are NA
-# ✔ No standard errors look unreasonably large
-# ✔ No sigma parameters are < 0.01
-# ✖ `sigma_E` is larger than 100
-# ℹ Consider simplifying the model or adding priors
+##------------------------------------------------------------------------------
+## ✖ `ln_tau_O` standard error may be large
+## ℹ `ln_tau_O` is an internal parameter affecting `sigma_O`
+## ℹ `sigma_O` is the spatial standard deviation
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+##
+#### tau_O: This parameter often represents the precision (the inverse of the variance) #### of a random effect component in the model. In spatial and spatiotemporal models, it #### typically refers to the precision of the spatial or temporal random effects.
+##------------------------------------------------------------------------------
+## ✖ `sigma_O` is smaller than 0.01
+## ℹ Consider omitting this part of the model
+##
+#### In many spatial models, sigma_O could represent the spatial variance (or spatial #### range depending on the model), which determines the magnitude of spatial random #### effects or the degree of spatial correlation between observations.
+##
+#### could be:
+#### 1) Overfitting
+#### 2) Insufficient Data
+#### 3) Poor Model Specification:
+#### 4) Convergence Issues
+##------------------------------------------------------------------------------
+## ✖ `sigma_E` is larger than 100
+## ℹ Consider simplifying the model or adding priors
+##
+#### Large values of sigma_E indicate that there is a high level of spatial 
+#### variation that your model has not explained. 
+##------------------------------------------------------------------------------
+# ✔ Range parameters don't look unreasonably large
 
 summary(fit2)
+## M1:
+#### Spatiotemporal AR1 correlation (rho): 0.10
+#### Matérn range: 75.12
+#### Spatial SD: 0.00
+#### Spatiotemporal marginal AR1 SD: 615.41
+## M2:
+#### Dispersion Parameter: 0.45 (Good, typical range: 0.5-1.5)
+#### Spatiotemporal AR1 Correlation (rho): 0.67 (Moderate to strong, 
+## typical range: 0.4 - 0.8)
+#### Matérn Range: 122.28 (Good, typical range: 50-200 depending on scale)
+#### Spatial SD: 0.01
+#### Spatiotemporal Marginal AR1 SD: 48.57 (Good, typical range: 10-50)
+#### ML Criterion: 4509.807 (Best used for model comparison, not absolute assessment)
 
 # Predict (gives a whole new df, unlike GAM)
 pTrain2 <- predict(fit2, newdata = train, type = "response")
@@ -532,57 +813,46 @@ pTrain2 <- predict(fit2, newdata = train, type = "response")
 pTest2 <- predict(fit2, newdata = test, type = "response")
 
 # Overall R2 for test and train 
-summary(lm(Density ~ est, data = pTrain2))$r.squared # 0.07398241
-summary(lm(Density ~ est, data = pTest2))$r.squared # 5.998492e-05
+summary(lm(Density ~ est, data = pTrain2))$r.squared # 0.1437345
+summary(lm(Density ~ est, data = pTest2))$r.squared # 8.934804e-05
 
 # MAE
-mean(abs(pTrain2$Density - pTrain2$est)) # 1304.142
-mean(abs(pTest2Density - pTest2$est)) # 665.5521
+mean(abs(pTrain2$Density - pTrain2$est)) # 280.5764
+mean(abs(pTest2$Density - pTest2$est)) # 1.094452
 
 mean(train$Density)
-# [1] 666.9524
+# [1] 209.332
 sd(train$Density)
-# [1] 19792.58
+# [1] 11090.42
 
 mean(test$Density)
-# [1] 2.688917                                                                  
+# [1] 1.094451                                                                  
 sd(test$Density)
-# [1] 42.18626
+# [1] 28.57991
 
 ```
-
-
-## For a "Spatial" model without covars
-
-This is a test run to see if we can explain the distribution by spatialtemporal distribution.
+## Try with spatio and no temporal effects 
 
 ```{r, make.base.sptl.model}
 
 set.seed(1)
 
-fit1 <- sdmTMB(Density ~ 0 + as.factor(age) + as.factor(len_bin), 
+fit3 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin), 
                data = train, 
                mesh = barrier,
-               time_varying = ~ 1,
                # Fit model by year and quarter
                time = "NumericQuarter",
                # Use "ar1" if you expect temporal autocorrelation
                # Otherwise, use default "rw"
-               spatiotemporal = "ar1",
+               spatiotemporal = "off",
                spatial = "on", 
                extra_time = est.missing.time,
                # Fit hurdle model (first link is 0 or 1, second link is > 0)
                family = delta_gamma(link1 = "logit", link2 = "log"),
                anisotropy = FALSE)
 
-```
-
-```{r}
-
-```
-
 # Check model skill, fit, and convergence
-sanity(fit1)
+sanity(fit3)
 # ✔ Non-linear minimizer suggests successful convergence
 # ✔ Hessian matrix is positive definite
 # ✔ No extreme or very small eigenvalues detected
@@ -590,35 +860,524 @@ sanity(fit1)
 # ✔ No fixed-effect standard errors are NA
 # ✔ No standard errors look unreasonably large
 # ✔ No sigma parameters are < 0.01
-# ✖ No sigma parameters are > 100
+##------------------------------------------------------------------------------
+## ✖ `sigma_O` is larger than 100
+## ℹ Consider simplifying the model or adding priors
+##
+#### the variance (or precision component) associated with the spatial or temporal 
+#### random effects in your model is being estimated as greater than 100
+##
+#### This could be an indication of overfitting, where the model is assigning large 
+#### variability to the random effects because it’s fitting noise in the data rather #### than capturing meaningful signal or that there is a high degree of variability in #### the spatial (or temporal) random effects. 
+##------------------------------------------------------------------------------
+## ✔ Range parameters don't look unreasonably large
 
-summary(fit1)
+summary(fit3)
+## M1:
+#### Matérn range: 518.14
+#### Spatial SD: 550.87
+## M2:
+#### Dispersion parameter: 0.32
+#### Matérn range: 119.87
+#### Spatial SD: 53.88
+#### ML criterion at convergence: 7448.513
 
 # Predict (gives a whole new df, unlike GAM)
-pTrain1 <- predict(fit1, newdata = train, type = "response")
-pTest1 <- predict(fit1, newdata = test, type = "response")
+pTrain3 <- predict(fit3, newdata = train, type = "response")
+pTest3 <- predict(fit3, newdata = test, type = "response")
 
 # Overall R2 for test and train 
-summary(lm(Density ~ est, data = pTrain1))$r.squared # 0.7182932
-summary(lm(Density ~ est, data = pTest1))$r.squared # 0.00090351
+summary(lm(Density ~ est, data = pTrain3))$r.squared # 0.1406107
+summary(lm(Density ~ est, data = pTest3))$r.squared # 5.224278e-06
 
 # MAE
-mean(abs(pTrain1$Density - pTrain1$est)) # 15.36969
-mean(abs(pTest1$Density - pTest1$est)) # 14.27339
+mean(abs(pTrain3$Density - pTrain3$est)) # 250.8098
+mean(abs(pTest3$Density - pTest3$est)) # 25.09882
 
 mean(train$Density)
-# [1] 18.10529                                                                     
+# [1] 209.332
 sd(train$Density)
-# [1] 91.00154
+# [1] 11090.42
 
 mean(test$Density)
-# [1] 11.67489                                                                     
+# [1] 1.094451                                                                  
 sd(test$Density)
-# [1] 32.81762
-
-# Partial plots. Could make nicer later
-## Area_id
-Area_idPartial1 <- visreg(fit1, xvar = "Area_id", gg = TRUE)
-Area_idPartial1 
+# [1] 28.57991
 
 ```
+
+# Regroup Quarts as 2 Seasons
+
+There is moderate to strong temporal autocorrelation in the model as the modelling mean absolute error is significantly reduced by inclusion of temporal effects. However the spatial effects are not be well captured.
+
+```{r, 2season.structure}
+
+TwoSeas.dat <- Full.dat %>%
+  mutate(
+    Season = case_when(
+      month(Date) %in% 1:6 ~ "Season 1 (Jan-Jun)",
+      month(Date) %in% 7:12 ~ "Season 2 (July-Dec)"
+      ),
+    # Create combined time step variable using year and season
+    YearSeas = paste(year(Date), Season, sep = "_"),
+     Season.nm =  
+      case_when(
+      grepl("Season 1", Season) ~ 1,
+      grepl("Season 2", Season) ~ 2
+      ),
+    # Combine year and numeric season
+    YearSeas.nm = (Year + (Season.nm - 1) / 10)
+    )
+# View(TwoSeas.dat)  
+
+unique(TwoSeas.dat$YearSeas)
+unique(TwoSeas.dat$YearSeas.nm)
+
+```
+
+# Test/train split with Season
+
+Split 28 quarters (16 years) for training and 10 quarters (5 years) for out-of-model testing. For the time_series_split function, you need to have a datetime object. 
+
+```{r, split.data2}
+
+tims2 <- data.frame("YearSeas" = sort(unique(TwoSeas.dat$YearSeas))) %>%
+  arrange(YearSeas)  # ensures sorted order
+
+# Single split: 75% train, last 3 time points as test
+split <- timetk::time_series_split(
+  tims2,
+  date_var = YearSeas,
+  initial = floor(0.75 * nrow(tims2)),
+  assess = ceiling(0.25 * nrow(tims2))
+)
+
+# Create training set
+train_dates2 <- rsample::training(split)
+train2 <- subset(TwoSeas.dat, YearSeas %in% train_dates2$YearSeas)
+tail(train2$YearSeas)
+
+# Create test set
+test_dates2  <- rsample::testing(split)
+test2 <- subset(TwoSeas.dat, YearSeas %in% test_dates2$YearSeas) 
+head(test2$YearSeas)
+
+```
+
+# Find missing seasons
+
+```{r, missing.seasons}
+
+# Generate complete sequence
+# Define the range of years
+years <- 2003:2024
+
+# Create the sequence of year-season combinations
+year_season_sequence <- data.frame(
+  YearSeas.nm = unlist(lapply(years, function(year) {
+  # For each year, create two entries: season 1 (0.0) and season 2 (0.1)
+  ## year + 0/10 gives 2003.0,while year + 1/10 gives 2003.1
+  c(year + 0 / 10, year + 1 / 10)  
+}))
+)
+
+# Print the resulting sequence
+year_season_sequence
+
+missing_seas <- year_season_sequence %>%
+  anti_join(TwoSeas.dat, by = "YearSeas.nm") %>%
+  select(YearSeas.nm)
+
+missing_seas
+
+```
+
+# Next construct the seasonal mesh: 
+
+This is the same procedure as above.
+
+```{r, construct.seasonal.mesh}
+
+# Get summary table for nearest neighbor
+coords2 <- cbind(train2$X, train2$Y)
+nn_dist2 <- nndist(coords2)
+summary(nn_dist2)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.0000  0.0000  0.0000  0.1143  0.0000 44.3049 
+
+# Set cut-toff to 1 + 2/3 distance (mean or median - choose median if strong outliers)
+## This is informed by the SPDE theory about mesh resolution relative to
+## spatial range (check Lindgren et al. 2011 and related papers)
+cutoff2 <- round(median(nn_dist2) + median(nn_dist2)*(2/3))
+cutoff2
+
+# Cutoff values control the minimum distance between knots.
+## It is generally better to start with a coarser mesh (larger cutoff)
+## However there is a tradeoff on spatial predictability (more knots) and
+## over fitting the time to process. If the day is irregularly distributed
+## you can also try residual-based knot placement
+meshTrain2 <- make_mesh(train2, xy_cols = c("X", "Y"), cutoff = 50) 
+
+# Check number of mesh nodes 
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(meshTrain2$mesh$loc[,1])
+# [1] 212
+
+# proj_scaling should match units of (since we are working in m, but density
+# is in km, divide by 1000)
+barrier2 <- add_barrier_mesh(meshTrain2, land.barrier, proj_scaling = 1000)
+
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(barrier2$mesh$loc[,1])
+# [1] 212
+
+# Example plot code from ?add_barrier_mesh
+mesh_df_water2 <- barrier2$mesh_sf[barrier2$normal_triangles, ]
+mesh_df_land2 <- barrier2$mesh_sf[barrier2$barrier_triangles, ]
+
+Mesh.with.barrier2 <-
+ggplot() +
+  geom_sf(data = land.barrier) +
+  geom_sf(data = mesh_df_water2, size = 1, colour = "blue") +
+  geom_sf(data = mesh_df_land2, size = 1, colour = "green")
+
+Mesh.with.barrier2
+# [1] 231
+
+ggsave2(filename=paste("Seasonal.Mesh.with.barrier.jpeg",sep=''),
+        plot=Mesh.with.barrier2, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+plot(barrier2)
+points(train2$X, train2$Y, col = "red", pch = 19, 
+       cex = 0.2)
+
+```
+
+# Now build the Seasonal models:
+
+## For a "Non-spatial" model without covars
+
+This is a test run to see if we can explain the distribution by discrete time and OM spatial area 
+
+```{r, make.base.seasonal.nonsptl.model}
+
+set.seed(2) 
+
+# Define extra time steps to estimate
+est.missing.time2 <- unique(c(missing_seas$YearSeas.nm, test2$YearSeas.nm)) %>%
+  sort
+
+## Add age and length fixed effects without temporal or spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin
+fit4 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin),
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and month
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent per time step)
+               spatiotemporal = "off",
+               spatial = "off", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit4)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+
+summary(fit4)
+#### Dispersion Parameter: 0.17 (Good, typical range: 0.5-1.5)
+#### ML Criterion: 8662.229 (Best used for model comparison, not absolute assessment)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain4 <- predict(fit4, newdata = train2, type = "response")
+
+pTest4 <- predict(fit4, newdata = test2, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain4))$r.squared # 0.005737915
+summary(lm(Density ~ est, data = pTest4))$r.squared # 1.419252e-05
+
+# MAE
+mean(abs(pTrain4$Density - pTrain4$est)) # 457.6253
+mean(abs(pTest4$Density - pTest4$est)) # 415.5279
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+```
+
+## Try with temporal autocorrelation
+
+```{r, make.seasonal.nonsptl.model}
+
+set.seed(2) 
+
+## Add age and le ngth fixed effects with temporal autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin
+fit5 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin),
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit5)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+##------------------------------------------------------------------------------
+## `ln_tau_E` gradient > 0.001
+## ℹ See ?run_extra_optimization(), standardize covariates, and/or simplify the model
+##
+#### Signals that the optimization algorithm has not fully converged for the precision #### of the random effects parameter (ln_tau_E). This could be due to optimization 
+#### difficulties, model specification issues, or data quality concerns. To address #### this, you might need to adjust your model, check your data, or tweak the 
+#### optimization process (e.g., by increasing iterations or improving starting 
+#### values).
+##------------------------------------------------------------------------------
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+##------------------------------------------------------------------------------
+## ✖ `sigma_E` is larger than 100
+## ℹ Consider simplifying the model or adding priors
+##
+#### Large values of sigma_E indicate that there is a high level of spatial 
+#### variation that your model has not explained. 
+##------------------------------------------------------------------------------
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit5)
+## M1:
+#### Spatiotemporal AR1 correlation (rho): 0.10
+#### Matérn range: 77.17
+#### Spatiotemporal marginal AR1 SD: 594.85
+## M2:
+#### Dispersion Parameter: 0.45 (Good, typical range: 0.5-1.5)
+#### Spatiotemporal AR1 Correlation (rho): 0.48 (Moderate to strong, 
+## typical range: 0.4 - 0.8)
+#### Matérn Range: 121.11 (Good, typical range: 50-200 depending on scale)
+#### Spatiotemporal Marginal AR1 SD: 49.19 (Good, typical range: 10-50)
+#### ML Criterion: 4290.250 (Best used for model comparison, not absolute assessment)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain5 <- predict(fit5, newdata = train2, type = "response")
+
+pTest5 <- predict(fit5, newdata = test2, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain5))$r.squared # 0.1411138
+summary(lm(Density ~ est, data = pTest5))$r.squared # 8.335531e-05
+
+# MAE
+mean(abs(pTrain5$Density - pTrain5$est)) # 314.9381
+mean(abs(pTest5$Density - pTest5$est)) # 0.9113859
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+```
+
+## Try with spatial effects
+
+```{r, make.seasonal.sptl.model}
+
+set.seed(2) 
+
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit6 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin),
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "on", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit6)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+##------------------------------------------------------------------------------
+## ✖ `sigma_E` is larger than 100
+## ℹ Consider simplifying the model or adding priors
+##
+#### Large values of sigma_E indicate that there is a high level of spatial 
+#### variation that your model has not explained. 
+##------------------------------------------------------------------------------
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit6)
+## M1:
+#### Spatiotemporal AR1 correlation (rho): 0.08
+#### Matérn range: 82.73
+#### Spatial SD: 81.67
+#### Spatiotemporal marginal AR1 SD:  625.07
+
+## M2:
+#### Dispersion Parameter: 0.45 (Good, typical range: 0.5-1.5)
+#### Spatiotemporal AR1 Correlation (rho): 0.44 (Moderate to strong, 
+## typical range: 0.4 - 0.8)
+#### Matérn Range: 119.278 (Good, typical range: 50-200 depending on scale)
+#### Spatial SD: 10.11
+#### Spatiotemporal Marginal AR1 SD: 47.38 (Good, typical range: 10-50)
+#### ML Criterion: 4289.604 (Best used for model comparison, not absolute assessment)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain6 <- predict(fit6, newdata = train2, type = "response")
+
+pTest6 <- predict(fit6, newdata = test2, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain6))$r.squared # 0.140585
+summary(lm(Density ~ est, data = pTest6))$r.squared # 2.217959e-06
+
+# MAE
+mean(abs(pTrain6$Density - pTrain6$est)) # 314.6031
+mean(abs(pTest6$Density - pTest6$est)) # 0.9113865
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+```
+
+## Try with spatio and no temporal effects 
+
+```{r, make.base.seasonal.sptl.model}
+
+set.seed(2)
+
+fit7 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin), 
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and quarter
+               time = "YearSeas.nm",
+               # Use "ar1" if you expect temporal autocorrelation
+               # Otherwise, use default "rw"
+               spatiotemporal = "off",
+               spatial = "on", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit7)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+##------------------------------------------------------------------------------
+## ✖ `sigma_O` is larger than 100
+## ℹ Consider simplifying the model or adding priors
+##
+#### the variance (or precision component) associated with the spatial or temporal 
+#### random effects in your model is being estimated as greater than 100
+##
+#### This could be an indication of overfitting, where the model is assigning large 
+#### variability to the random effects because it’s fitting noise in the data rather #### than capturing meaningful signal or that there is a high degree of variability in #### the spatial (or temporal) random effects. 
+##------------------------------------------------------------------------------
+## ✔ Range parameters don't look unreasonably large
+
+summary(fit7)
+## M1:
+#### Matérn range: 483.07
+#### Spatial SD: 510.60
+## M2:
+#### Dispersion parameter: 0.33
+#### Matérn range: 111.90
+#### Spatial SD: 52.69
+#### ML criterion at convergence: 6888.455
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain7 <- predict(fit7, newdata = train2, type = "response")
+pTest7 <- predict(fit7, newdata = test2, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain7))$r.squared # 0.1012595
+summary(lm(Density ~ est, data = pTest7))$r.squared # 3.592542e-06
+
+# MAE
+mean(abs(pTrain7$Density - pTrain7$est)) # 294.2342
+mean(abs(pTest7$Density - pTest7$est)) # 24.7259
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+```
+

@@ -1034,7 +1034,7 @@ colnames(test.area.transects.prestep)
 
 areaTranBuffsum.prep <- test.area.transects.prestep %>%
   # Select only general group id names plus haul identifiers
-  select(keys,  date, tim_stp, clstGRP, geometry) %>%
+  select(keys, date, tim_stp, clstGRP, geometry) %>%
   distinct() %>%
   group_by(tim_stp, clstGRP) %>%
   # How many hauls per unique year and month by night and day
