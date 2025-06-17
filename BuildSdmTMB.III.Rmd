@@ -1,0 +1,595 @@
+---
+title: "BuildSdmTMB"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    
+---
+
+```{r setup, include=FALSE}
+
+# Run first if not already installed
+#remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
+
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
+              "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg",
+              "ggforce", # enables plot_anisotropy
+              "spatstat",# Get summary table for nearest neighbor
+              "rsample", "timetk", "zoo") 
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+sf_use_s2(FALSE)
+
+dir <- here(getwd())
+
+```
+
+# Load YearQuarter data
+
+```{r, load.quarterly.data}
+
+# Training set
+train <- fread(here(dir, "Data", "ExampleRun", "train"))
+
+# Test set
+test <- fread(here(dir, "Data", "ExampleRun", "test"))
+
+# YearQuarter gaps to fill
+load(file = here(dir, "Data", "ExampleRun",
+                                    "est.missing.time.rda"))
+  
+```
+
+# Construct YearQuarter mesh: 
+
+see https://pbs-assess.github.io/sdmTMB/articles/basic-intro.html: cutoff is in the units of X and Y (km here), represents minimum distance between knots before a new mesh vertex is added). Muhling et al., 2025 tried a bunch of cutoff values, and chose one that 1) had good out-of-sample predictability, and 2) wasn't too "blocky". They found Values between ~ 50 and 200 were fairly reasonable. 
+
+Important: cannot use anisotropy with barrier mesh (see warning when run sdmTMB).
+
+```{r, construct.mesh.yrqrt}
+
+# Load land barrier
+land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+
+# Cutoff values control the minimum distance between knots (here in km).
+## It is generally better to start with a coarser mesh (larger cutoff)
+## However there is a tradeoff on spatial predictability (more knots) and
+## over fitting the time to process. If the day is irregularly distributed
+## you can also try residual-based knot placement
+meshTrain <- make_mesh(train, xy_cols = c("X", "Y"), cutoff = 50) 
+
+# proj_scaling should match units of (since we are working in m, but density
+# is in km, divide by 1000)
+barrier <- add_barrier_mesh(meshTrain, land.barrier, proj_scaling = 1000)
+
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(barrier$mesh$loc[,1])
+# [1] 213
+
+# Example plot code from ?add_barrier_mesh
+mesh_df_water <- barrier$mesh_sf[barrier$normal_triangles, ]
+mesh_df_land <- barrier$mesh_sf[barrier$barrier_triangles, ]
+
+Mesh.with.barrier <-
+ggplot() +
+  geom_sf(data = land.barrier) +
+  geom_sf(data = mesh_df_water, size = 1, colour = "blue") +
+  geom_sf(data = mesh_df_land, size = 1, colour = "green")
+
+plot(barrier)
+points(train$X, train$Y, col = "red", pch = 19, 
+       cex = 0.2)
+
+```
+
+# Run YearQuarter models
+
+## For a "Non-spatial" model without covars
+
+This is a test run to see if we can explain the distribution by discrete time and OM spatial area 
+
+```{r, make.base.nonsptl.model.w.fix.tim}
+
+set.seed(1) 
+
+## Add age and length fixed effects without temporal or spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin
+fit8 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) +
+                 factor(YearQuarter.dup),
+               data = train, 
+               mesh = barrier,
+               # Fit model by year and month
+               time = "NumericQuarter",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent per time step)
+               spatiotemporal = "off",
+               spatial = "off", 
+               extra_time = as.factor(est.missing.time),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit8)
+
+summary(fit8)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain8 <- predict(fit8, newdata = train, type = "response") #
+pTest8 <- predict(fit8, newdata = test, type = "response") #
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain8))$r.squared #
+summary(lm(Density ~ est, data = pTest8))$r.squared #
+
+# MAE
+mean(abs(pTrain8$Density - pTrain8$est)) #
+mean(abs(pTest8$Density - pTest8$est)) #
+
+mean(train$Density)
+# [1] 209.332
+sd(train$Density)
+# [1] 11090.42
+
+mean(test$Density)
+# [1] 1.094451                                                                  
+sd(test$Density)
+# [1] 28.57991
+
+```
+
+## Try with temporal autocorrelation
+
+```{r, make.nonsptl.model.w.fix.tim}
+
+set.seed(1) 
+
+## Add age and le ngth fixed effects with temporal autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin
+fit9 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) +
+                 as.factor(YeaSeas.dup),
+               data = train, 
+               mesh = barrier,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "NumericQuarter",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = est.missing.time,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit9)
+
+summary(fit9)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain9 <- predict(fit9, newdata = train, type = "response")
+pTest9 <- predict(fit9, newdata = test, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain9))$r.squared #
+summary(lm(Density ~ est, data = pTest9))$r.squared # 
+
+# MAE
+mean(abs(pTrain9$Density - pTrain9$est)) # 
+mean(abs(pTest9$Density - pTest9$est)) # 
+
+mean(train$Density)
+# [1] 209.332
+sd(train$Density)
+# [1] 11090.42
+
+mean(test$Density)
+# [1] 1.094451                                                                  
+sd(test$Density)
+# [1] 28.57991
+
+```
+
+## Try with spatial effects
+
+```{r, make.sptl.model.w.fix.tim}
+
+set.seed(1) 
+
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit10 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) +
+                  as.factor(YearSeas.dup),
+               data = train, 
+               mesh = barrier,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "NumericQuarter",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "on", 
+               extra_time = est.missing.time,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit10)
+
+summary(fit10)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain10 <- predict(fit10, newdata = train, type = "response")
+pTest10 <- predict(fit10, newdata = test, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain10))$r.squared # 
+summary(lm(Density ~ est, data = pTest10))$r.squared # 
+
+# MAE
+mean(abs(pTrain10$Density - pTrain10$est)) # 
+mean(abs(pTest10$Density - pTest10$est)) # 
+
+mean(train$Density)
+# [1] 209.332
+sd(train$Density)
+# [1] 11090.42
+
+mean(test$Density)
+# [1] 1.094451                                                                  
+sd(test$Density)
+# [1] 28.57991
+
+```
+
+## Try with spatio and no temporal effects 
+
+```{r, make.base.sptl.model.w.fix.tim}
+
+set.seed(1)
+
+fit11 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) +
+                  as.factor(YearSeas.dup), 
+               data = train, 
+               mesh = barrier,
+               # Fit model by year and quarter
+               time = "NumericQuarter",
+               # Use "ar1" if you expect temporal autocorrelation
+               # Otherwise, use default "rw"
+               spatiotemporal = "off",
+               spatial = "on", 
+               extra_time = est.missing.time,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit11)
+
+summary(fit11)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain11 <- predict(fit11, newdata = train, type = "response")
+pTest11 <- predict(fit11, newdata = test, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain11))$r.squared # 
+summary(lm(Density ~ est, data = pTest11))$r.squared # 
+
+# MAE
+mean(abs(pTrain3$Density - pTrain3$est)) # 
+mean(abs(pTest3$Density - pTest3$est)) # 
+
+mean(train$Density)
+# [1] 209.332
+sd(train$Density)
+# [1] 11090.42
+
+mean(test$Density)
+# [1] 1.094451                                                                  
+sd(test$Density)
+# [1] 28.57991
+
+```
+
+# Load YearSeason data
+
+```{r, load.seasonal.data}
+
+# Training set 2
+train2 <- fread(here(dir, "Data", "ExampleRun", "train2"))
+
+# Test set 2
+test2 <- fread(here(dir, "Data", "ExampleRun", "test2"))
+
+# YearSeason gaps to fill
+load(file = here(dir, "Data", "ExampleRun",
+                                    "est.missing.time2.rda"))
+  
+```
+
+# Construct YearSeason mesh: 
+
+see https://pbs-assess.github.io/sdmTMB/articles/basic-intro.html: cutoff is in the units of X and Y (km here), represents minimum distance between knots before a new mesh vertex is added). Muhling et al., 2025 tried a bunch of cutoff values, and chose one that 1) had good out-of-sample predictability, and 2) wasn't too "blocky". They found Values between ~ 50 and 200 were fairly reasonable. 
+
+Important: cannot use anisotropy with barrier mesh (see warning when run sdmTMB).
+
+```{r, construct.mesh}
+
+# Load land barrier
+land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+
+# Cutoff values control the minimum distance between knots (here in km).
+## It is generally better to start with a coarser mesh (larger cutoff)
+## However there is a tradeoff on spatial predictability (more knots) and
+## over fitting the time to process. If the day is irregularly distributed
+## you can also try residual-based knot placement
+meshTrain2 <- make_mesh(train2, xy_cols = c("X", "Y"), cutoff = 50) 
+
+# proj_scaling should match units of (since we are working in m, but density
+# is in km, divide by 1000)
+barrier2 <- add_barrier_mesh(meshTrain2, land.barrier, proj_scaling = 1000)
+
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(barrier2$mesh$loc[,1])
+# [1] 212
+
+# Example plot code from ?add_barrier_mesh
+mesh_df_water2 <- barrier2$mesh_sf[barrier2$normal_triangles, ]
+mesh_df_land2 <- barrier2$mesh_sf[barrier2$barrier_triangles, ]
+
+Mesh.with.barrier2 <-
+ggplot() +
+  geom_sf(data = land.barrier) +
+  geom_sf(data = mesh_df_water2, size = 1, colour = "blue") +
+  geom_sf(data = mesh_df_land2, size = 1, colour = "green")
+
+plot(barrier2)
+points(train2$X, train2$Y, col = "red", pch = 19, 
+       cex = 0.2)
+
+```
+
+# Run YearSeason models
+
+## For a "Non-spatial" model without covars
+
+This is a test run to see if we can explain the distribution by discrete time and OM spatial area 
+
+```{r, make.base.seasonal.nonsptl.model.w.fix.tim}
+
+set.seed(2) 
+
+## Add age and length fixed effects without temporal or spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin
+fit12 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) + 
+                 as.factor(YearSeas.dup),
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and month
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent per time step)
+               spatiotemporal = "off",
+               spatial = "off", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit12)
+
+summary(fit12)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain12 <- predict(fit12, newdata = train2, type = "response")
+
+pTest12 <- predict(fit12, newdata = test2, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain12))$r.squared # 
+summary(lm(Density ~ est, data = pTest12))$r.squared # 
+
+# MAE
+mean(abs(pTrain12$Density - pTrain12$est)) # 
+mean(abs(pTest12$Density - pTest12$est)) # 
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+```
+
+## Try with temporal autocorrelation
+
+```{r, make.seasonal.nonsptl.model.w.fix.tim}
+
+set.seed(2) 
+
+## Add age and length fixed effects with temporal autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin
+fit13 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) +
+                 as.factor(YearSeas.dup),
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit13)
+
+summary(fit13)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain13 <- predict(fit13, newdata = train2, type = "response")
+pTest13 <- predict(fit13, newdata = test2, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain13))$r.squared # 
+summary(lm(Density ~ est, data = pTest13))$r.squared # 
+
+# MAE
+mean(abs(pTrain5$Density - pTrain5$est)) # 
+mean(abs(pTest5$Density - pTest5$est)) # 
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+```
+
+## Try with spatial effects
+
+```{r, make.seasonal.sptl.model.w.fix.tim}
+
+set.seed(2) 
+
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit14 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) +
+                 as.factor(YearSeas.dup),
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "on", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit14)
+
+summary(fit14)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain14 <- predict(fit14, newdata = train14, type = "response")
+pTest14 <- predict(fit14, newdata = test14, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain14))$r.squared # 
+summary(lm(Density ~ est, data = pTest14))$r.squared # 
+
+# MAE
+mean(abs(pTrain14$Density - pTrain14$est)) # 
+mean(abs(pTest14$Density - pTest14$est)) # 
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+```
+
+## Try with spatio and no temporal effects 
+
+```{r, make.base.seasonal.sptl.model.w.fix.tim}
+
+set.seed(2)
+
+fit15 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) + 
+                  as.factor(YearSeas.dup), 
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and quarter
+               time = "YearSeas.nm",
+               # Use "ar1" if you expect temporal autocorrelation
+               # Otherwise, use default "rw"
+               spatiotemporal = "off",
+               spatial = "on", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit15)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain15 <- predict(fit15, newdata = train2, type = "response")
+pTest15 <- predict(fit15, newdata = test2, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain15))$r.squared # 
+summary(lm(Density ~ est, data = pTest15))$r.squared # 
+
+# MAE
+mean(abs(pTrain15$Density - pTrain15$est)) # 
+mean(abs(pTest15$Density - pTest15$est)) # 
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+```

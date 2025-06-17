@@ -11,7 +11,7 @@ output:
 ```{r setup, include=FALSE}
 
 # Run first if not already installed
-# remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
+#remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
 
 rm(list=ls())
 gc()
@@ -445,18 +445,28 @@ train_dates <- rsample::training(split)
 train <- subset(Full.dat, YearQuarter %in% train_dates$YearQuarter)
 tail(train$YearQuarter)
 
+fwrite(train, here(dir, "Data", "ExampleRun", "train"))
+
 # Apply all levels to the data
-train <- train %>%
- mutate(YearQuarter.dup = factor(YearQuarter.dup, levels = all_levels))
+# train <- train %>%
+#  mutate(YearQuarter.dup = factor(YearQuarter.dup, levels = all_levels))
 
 # Create test set
 test_dates  <- rsample::testing(split)
 test <- subset(Full.dat, YearQuarter %in% test_dates$YearQuarter) 
 head(test$YearQuarter)
 
+fwrite(test, here(dir, "Data", "ExampleRun", "test"))
 # Apply all levels to the data
-test <- test %>%
-  mutate(YearQuarter.dup = factor(YearQuarter.dup, levels = all_levels))
+# test <- test %>%
+#  mutate(YearQuarter.dup = factor(YearQuarter.dup, levels = all_levels))
+
+# Define extra time steps to estimate
+est.missing.time <- unique(c(missing_qtrs$NumericQuarter, test$NumericQuarter)) %>%
+  sort
+
+save(est.missing.time, file = here(dir, "Data", "ExampleRun",
+                                    "est.missing.time.rda"))
 
 ```
 
@@ -468,8 +478,7 @@ Here we look at the distance between clusters to assign knots using the summary 
 
 Important: cannot use anisotropy with barrier mesh (see warning when run sdmTMB).
 
-```{r, construct.mesh}
-
+#```{r, construct.mesh}
 # Read full resolution - Continental land masses and ocean islands, except Antarctica.
 land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "gshhg-shp-2.3.7",
                              "GSHHS_shp", "f", "GSHHS_f_L1.shp")) %>%
@@ -495,18 +504,27 @@ st_is_valid(land.barrier)
 # Drop levels
 land.barrier <- land.barrier %>% mutate(across(where(is.factor), droplevels))
 
-# Get summary table for nearest neighbor
-coords <- cbind(train$X, train$Y)
-nn_dist <- nndist(coords)
-summary(nn_dist)
+st_write(land.barrier, here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+
+#```
+
+
+```{r, construct.mesh}
+
+land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+
+# Get summary table for nearest neighbour
+#coords <- cbind(train$X, train$Y)
+#nn_dist <- nndist(coords)
+#summary(nn_dist)
 #   Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
 # 0.4631   4.8171   8.6841  11.2030  13.9212 163.6689 
 
 # Set cut-toff to 1 + 2/3 distance (mean or median - choose median if strong outliers)
 ## This is informed by the SPDE theory about mesh resolution relative to
 ## spatial range (check Lindgren et al. 2011 and related papers)
-cutoff <- round(median(nn_dist) + median(nn_dist)*(2/3))
-cutoff
+#cutoff <- round(median(nn_dist) + median(nn_dist)*(2/3))
+#cutoff
 
 # Cutoff values control the minimum distance between knots.
 ## It is generally better to start with a coarser mesh (larger cutoff)
@@ -543,10 +561,10 @@ ggplot() +
 Mesh.with.barrier
 # [1] 231
 
-ggsave2(filename=paste("Mesh.with.barrier.jpeg",sep=''),
-        plot=Mesh.with.barrier, device="jpeg", 
-        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
-        unit="cm", limitsize = FALSE)
+#ggsave2(filename=paste("Mesh.with.barrier.jpeg",sep=''),
+#        plot=Mesh.with.barrier, device="jpeg", 
+#        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+#        unit="cm", limitsize = FALSE)
 
 plot(barrier)
 points(train$X, train$Y, col = "red", pch = 19, 
@@ -636,18 +654,29 @@ train_dates2 <- rsample::training(split)
 train2 <- subset(TwoSeas.dat, YearSeas %in% train_dates2$YearSeas)
 tail(train2$YearSeas)
 
+fwrite(train2, here(dir, "Data", "ExampleRun", "train2"))
+
 # Apply all levels to the data
-train2 <- train2 %>%
-  mutate(YearSeas.dup = factor(YearSeas.dup, levels = all_levels2))
+# train2 <- train2 %>%
+#  mutate(YearSeas.dup = factor(YearSeas.dup, levels = all_levels2))
 
 # Create test set
 test_dates2  <- rsample::testing(split)
 test2 <- subset(TwoSeas.dat, YearSeas %in% test_dates2$YearSeas) 
 head(test2$YearSeas)
 
+fwrite(test2, here(dir, "Data", "ExampleRun", "test2"))
+
 # Apply all levels to the data
-test2 <- test2 %>%
-  mutate(YearSeas.dup = factor(YearSeas.dup, levels = all_levels2))
+# test2 <- test2 %>%
+#  mutate(YearSeas.dup = factor(YearSeas.dup, levels = all_levels2))
+
+# Define extra time steps to estimate
+est.missing.time2 <- unique(c(missing_seas$YearSeas.nm, test2$YearSeas.nm)) %>%
+  sort
+
+save(est.missing.time2, file = here(dir, "Data", "ExampleRun",
+                                    "est.missing.time2.rda"))
 
 ```
 
@@ -658,17 +687,17 @@ This is the same procedure as above.
 ```{r, construct.seasonal.mesh}
 
 # Get summary table for nearest neighbor
-coords2 <- cbind(train2$X, train2$Y)
-nn_dist2 <- nndist(coords2)
-summary(nn_dist2)
+#coords2 <- cbind(train2$X, train2$Y)
+#nn_dist2 <- nndist(coords2)
+#summary(nn_dist2)
 #    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
 # 0.0000  0.0000  0.0000  0.1143  0.0000 44.3049 
 
 # Set cut-toff to 1 + 2/3 distance (mean or median - choose median if strong outliers)
 ## This is informed by the SPDE theory about mesh resolution relative to
 ## spatial range (check Lindgren et al. 2011 and related papers)
-cutoff2 <- round(median(nn_dist2) + median(nn_dist2)*(2/3))
-cutoff2
+#cutoff2 <- round(median(nn_dist2) + median(nn_dist2)*(2/3))
+#cutoff2
 
 # Cutoff values control the minimum distance between knots.
 ## It is generally better to start with a coarser mesh (larger cutoff)
@@ -705,14 +734,20 @@ ggplot() +
 Mesh.with.barrier2
 # [1] 231
 
-ggsave2(filename=paste("Seasonal.Mesh.with.barrier.jpeg",sep=''),
-        plot=Mesh.with.barrier2, device="jpeg", 
-        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
-        unit="cm", limitsize = FALSE)
+#ggsave2(filename=paste("Seasonal.Mesh.with.barrier.jpeg",sep=''),
+#        plot=Mesh.with.barrier2, device="jpeg", 
+#        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+#        unit="cm", limitsize = FALSE)
 
 plot(barrier2)
 points(train2$X, train2$Y, col = "red", pch = 19, 
        cex = 0.2)
+
+# Define extra time steps to estimate
+est.missing.time2 <- unique(c(missing_seas$YearSeas.nm, test2$YearSeas.nm)) %>%
+  sort
+
+
 
 ```
 
@@ -723,10 +758,6 @@ This is a test run to see if we can explain the distribution by discrete time an
 ```{r, make.base.nonsptl.model.w.fix.tim}
 
 set.seed(1) 
-
-# Define extra time steps to estimate
-est.missing.time <- unique(c(missing_qtrs$NumericQuarter, test$NumericQuarter)) %>%
-  sort
 
 ## Add age and length fixed effects without temporal or spatial autocorrelation
 ## Note that this is testing presence absence and then density predicted by age
