@@ -581,15 +581,15 @@ There is moderate to strong temporal autocorrelation in the model as the modelli
 TwoSeas.dat <- Full.dat %>%
   mutate(
     Season = case_when(
-      month(Date) %in% 1:6 ~ "Season 1 (Jan-Jun)",
-      month(Date) %in% 7:12 ~ "Season 2 (July-Dec)"
+      month(Date) %in% 1:6 ~ "S1",
+      month(Date) %in% 7:12 ~ "S2"
       ),
     # Create combined time step variable using year and season
-    YearSeas = paste(year(Date), Season, sep = "_"),
+    YearSeas = paste(year(Date), Season, sep = ""),
      Season.nm =  
       case_when(
-      grepl("Season 1", Season) ~ 1,
-      grepl("Season 2", Season) ~ 2
+      grepl("S1", Season) ~ 1,
+      grepl("S2", Season) ~ 2
       ),
     # Combine year and numeric season
     YearSeas.nm = (Year + (Season.nm - 1) / 10),
@@ -704,7 +704,7 @@ This is the same procedure as above.
 ## However there is a tradeoff on spatial predictability (more knots) and
 ## over fitting the time to process. If the day is irregularly distributed
 ## you can also try residual-based knot placement
-meshTrain2 <- make_mesh(train2, xy_cols = c("X", "Y"), cutoff = 50) 
+meshTrain2 <- make_mesh(train2, xy_cols = c("X", "Y"), cutoff = 20) 
 
 # Check number of mesh nodes 
 ## If greater than >1,000–2,000 nodes, 
@@ -719,7 +719,7 @@ barrier2 <- add_barrier_mesh(meshTrain2, land.barrier, proj_scaling = 1000)
 ## If greater than >1,000–2,000 nodes, 
 ## you’re likely in trouble unless you have a lot of RAM.
 length(barrier2$mesh$loc[,1])
-# [1] 212
+# [1] 604
 
 # Example plot code from ?add_barrier_mesh
 mesh_df_water2 <- barrier2$mesh_sf[barrier2$normal_triangles, ]

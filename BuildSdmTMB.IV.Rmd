@@ -87,6 +87,8 @@ ggplot() +
   geom_sf(data = mesh_df_water2, size = 1, colour = "blue") +
   geom_sf(data = mesh_df_land2, size = 1, colour = "green")
 
+Mesh.with.barrier2
+
 ggsave2(filename=paste("Seasonal.Mesh.with.barrier.jpeg",sep=''),
         plot=Mesh.with.barrier2, device="jpeg", 
         path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
@@ -100,6 +102,99 @@ points(train2$X, train2$Y, col = "red", pch = 19,
 ```
 
 # Run YearSeason models
+
+## Try with spatial effects
+
+```{r, make.seasonal.sptl.model.w.fix.tim}
+
+set.seed(2) 
+
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit10 <- sdmTMB(Density ~ as.factor(age) + as.factor(len_bin) +
+                 as.factor(YearSeas.dup),
+               data = train2, 
+               mesh = barrier2,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "on", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit10)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+##------------------------------------------------------------------------------
+## ✖ `sigma_E` is larger than 100
+## ℹ Consider simplifying the model or adding priors
+##
+#### Large values of sigma_E indicate that there is a high level of spatial 
+#### variation that your model has not explained. 
+##------------------------------------------------------------------------------
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit10)
+## M1:
+#### Spatiotemporal AR1 correlation (rho): 0.08
+#### Matérn range: 82.73
+#### Spatial SD: 81.67
+#### Spatiotemporal marginal AR1 SD:  625.07
+
+## M2:
+#### Dispersion Parameter: 0.45 (Good, typical range: 0.5-1.5)
+#### Spatiotemporal AR1 Correlation (rho): 0.44 (Moderate to strong, 
+## typical range: 0.4 - 0.8)
+#### Matérn Range: 119.278 (Good, typical range: 50-200 depending on scale)
+#### Spatial SD: 10.11
+#### Spatiotemporal Marginal AR1 SD: 47.38 (Good, typical range: 10-50)
+#### ML Criterion: 4289.604 (Best used for model comparison, not absolute assessment)
+
+# Predict (gives a whole new df, unlike GAM)
+pTrain10 <- predict(fit10, newdata = train10, type = "response")
+
+pTest10 <- predict(fit10, newdata = test10, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Density ~ est, data = pTrain10))$r.squared # 0.140585
+summary(lm(Density ~ est, data = pTest10))$r.squared # 2.217959e-06
+
+# MAE
+mean(abs(pTrain10$Density - pTrain10$est)) # 314.6031
+mean(abs(pTest10$Density - pTest10$est)) # 0.9113865
+
+mean(train2$Density)
+# [1] 231.8522
+sd(train2$Density)
+# [1] 11672.67
+
+mean(test2$Density)
+# [1] 0.9113857                                                               
+sd(test2$Density)
+# [1] 24.58594
+
+fit10_op <- run_extra_optimization(fit10, newton_loops = 10)
+max(fit10$gradients)
+max(fit10_op$gradients)
+
+sanity(fit10_op)
+
+```
 
 ## Try with AR1 and Age specific Intercept
 
@@ -564,6 +659,7 @@ sd(test2$Density)
 ```
 ```{r}
 
+BIC(fit11)
 BIC(fit12)
 BIC(fit13)
 BIC(fit14)
