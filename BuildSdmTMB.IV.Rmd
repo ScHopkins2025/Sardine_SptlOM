@@ -12,7 +12,7 @@ output:
 
 # Run first if not already installed
 # remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
-# remotes::install_github("pbs-assess/sdmTMB")
+ 
 
 rm(list=ls())
 gc()

@@ -1,0 +1,1149 @@
+
+---
+title: "BuildSdmTMB"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    
+---
+
+```{r setup, include=FALSE}
+
+# Run first if not already installed
+# remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
+# remotes::install_github("pbs-assess/sdmTMB")
+
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
+              "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg",
+              "ggforce", # enables plot_anisotropy
+              "spatstat",# Get summary table for nearest neighbor
+              "rsample", "timetk", "zoo") 
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+sf_use_s2(FALSE)
+
+dir <- here(getwd())
+
+```
+
+# Load previous sdm data
+
+Build new adult sardine SDM using environmental predictors from the 3km WC15 ROMS.
+Vars are SST, surface chl-a, upper 50m zooplankton biomass, SSB. 
+Chl-a didn't improve AUC, dropped for now.
+
+```{r, load.previous.dat}
+
+# Where previous data is stored
+sdmDir <- here(dir, "Data", "Previous.sdmTMB.Data")
+
+# Load data
+dat <- readRDS(paste(sdmDir, "/sardineTrainingData.rds", sep = ""))
+
+# Project data
+dat2 <- dat %>%
+  filter(yr > 2002 & survey == 'cps') %>% 
+  distinct() %>%
+  group_by(yr) %>%
+  mutate(hauls = n_distinct(haul)) %>%
+  ungroup() %>% 
+  select(yr, cruise, haul, lat, hauls) %>% 
+  distinct()
+# View(dat2)
+
+test2003 <- dat %>% filter(yr == 2003 & survey == 'cps')
+
+length(unique(test2003$haul))
+# [1] 41
+# View(test2003)
+
+```
+
+# Load new sdm data
+
+There will likely be some hauls not previously accounted, but the number of hauls should be similar. Use 2003 as a test run.
+
+```{r, load.new.dat}
+
+areaTranBuffsum.polygons <- 
+   read_sf(here(dir, "Data", "Shapefiles", "cluster.with.area.defs.shp"))
+#View(areaTranBuff.polygons)
+
+unique(areaTranBuffsum.polygons$Area_id)
+# [1] 2 3 4 5 1
+
+sort(unique(areaTranBuffsum.polygons$Area_id))
+# [1] 1 2 3 4 5
+
+areaTranBuff.polygons.2003 <- areaTranBuffsum.polygons %>%
+  filter(Year == 2003)
+
+colnames(areaTranBuffsum.polygons)
+
+```
+
+# Create density estimates to be used for biomass abundance indices
+
+Note that here we want to include the absence data and are not concerned by lengths
+
+```{r, biomass.density.area2}
+
+area2poly.dens <- areaTranBuffsum.polygons %>%
+  mutate(Cruise = substr(keys,1,6)) %>%
+  group_by(Cruise, Year, Month, Day, tim_stp, clstGRP, Hauls, NbClust, Area_id,
+           Area_km2, geometry, age, len_bin) %>%
+  # Note that some clusters will have both presence and absence data
+  # but this will give you the proportion to apply in stock synthesis for length
+  # and age
+  summarise(WghtLenBin = sum(WghtLenBin), .groups = "drop") %>%
+  mutate(
+    # Calculate density
+    Density = WghtLenBin / Area_km2,
+
+    # Create proper date object
+    Date = as.Date(paste(Year, Month, Day, sep = "-"), format = "%Y-%m-%d"),
+    
+    # Convert to numeric
+    Year = as.numeric(Year),
+    Month = as.numeric(Month),
+    Day = as.numeric(Day),
+
+    # Create YearQuarter
+    YearQuarter = as.yearqtr(Date),
+
+    # Extract numeric quarter
+    Quarter = case_when(
+      str_detect(YearQuarter, "Q1") ~ 1,
+      str_detect(YearQuarter, "Q2") ~ 2,
+      str_detect(YearQuarter, "Q3") ~ 3,
+      str_detect(YearQuarter, "Q4") ~ 4
+    ),
+
+    # Create numeric time step index from baseline year (e.g., 2003)
+    NumericQuarter = (Year - min(Year)) * 4 + Quarter,
+
+  ) %>%
+  select(-tim_stp)
+
+# View(area2poly.dens)
+
+plotNormalHistogram(area2poly.dens$Density)
+range(area2poly.dens$Density)
+# [1] 0.000 912149.7
+
+```
+
+# Extract polygon centers
+
+```{r, area2.mesh.prestep}
+
+# Extract polygon centers
+area2poly.dens2 <- area2poly.dens %>%
+  mutate(X = st_coordinates(st_centroid(.))[,1]/1000,
+         Y = st_coordinates(st_centroid(.))[,2]/1000) %>%
+  st_drop_geometry()
+
+```
+
+# Restructure data to include P/A
+
+First find mixed clusters where both presence and absence values exist. Filter out clusters that have only absence values.
+
+```{r, presence.absence.col.pt1}
+
+# Find steps where there are absence values within a cluster
+Absent.dat <- area2poly.dens2 %>%
+  filter(is.na(age)) %>%
+  select(-c(age,len_bin)) %>%
+  # Add key to identify clusters
+  mutate(vals = paste0(Cruise, Date, clstGRP, Area_id, Area_km2, X, Y))
+
+dim(Absent.dat)
+# [1] 1282   18
+
+# Find steps where there are presence values within a cluster
+Present.dat <- area2poly.dens2 %>%
+  filter(!is.na(age)) %>%
+  # Add presence binary value
+  mutate(PA = 1) %>%
+  # Add key to identify clusters
+  mutate(vals = paste0(Cruise, Date, clstGRP, Area_id, Area_km2, X, Y))
+
+# Clusters with both presence and absence should be given a 1 indicating presence, 
+# and are but are accounted for in the density measure. 
+Absent.dat.mxd <- Absent.dat %>%
+  filter(vals %in% Present.dat$vals) %>%
+  # Add presence binary value
+  mutate(PA = 1)
+
+# Find steps where the entire clusters has no Sardines
+# These should be given a 0 binary value indicating total absence.
+Absent.dat.all <- Absent.dat %>%
+  filter(!vals %in% Present.dat$vals) %>%
+  # Add absence binary value
+  mutate(PA = 0)
+
+```
+
+## For each bin in the presence data, split by age length bin
+
+Combine survey clusters with total absence and bin data so that for each cruise, there total absence clusters are appended.
+
+```{r, presence.absence.col.pt2}
+
+# Check that all Cruise values in Absent.dat.all are present in Present.dat
+unique(Absent.dat.all$Cruise) %in% unique(Present.dat$Cruise)
+#  [1]  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE FALSE
+# [14]  TRUE  TRUE  TRUE FALSE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE
+# [27]  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE  TRUE
+
+#-------------------------------------------------------------------------------
+# Store cruises where there are no shared Cruises
+#-------------------------------------------------------------------------------
+
+Absent.matched.cruise <- Absent.dat.all %>%
+  filter(Cruise %in% Present.dat$Cruise)
+
+dim(Absent.matched.cruise)
+# [1] 1020   19   
+
+## Check if there is at least a shared Date
+Absent.matched.time <- Absent.matched.cruise %>%
+  filter(Date %in% Present.dat$Date)
+
+dim(Absent.matched.time)
+# [1] 181  19
+
+## Check if there is at least a shared Year and Month
+Absent.matched.yrmon <- Absent.matched.cruise %>%
+  filter(!Date %in% Present.dat$Date &
+           Year %in% Present.dat$Year &
+           Month %in% Present.dat$Month)
+
+dim(Absent.matched.yrmon)
+# [1] 839  19
+
+#-------------------------------------------------------------------------------
+# Store cruises where there are no shared Cruises
+#-------------------------------------------------------------------------------
+
+Absent.ToTunique <- Absent.dat.all %>%
+  filter(!Cruise %in% Present.dat$Cruise)
+
+dim(Absent.ToTunique)
+# [1] 44 19
+
+## Check if there is at least a shared Date
+Absent.ToTunique.date <- Absent.ToTunique %>%
+  filter(Date %in% Present.dat$Date)
+
+dim(Absent.ToTunique.date)
+# [1] 24 19
+
+## Check if there is at least a shared Year and Month
+Absent.ToTunique.yrmon <- Absent.ToTunique %>%
+  filter(!Date %in% Present.dat$Date &
+           Year %in% Present.dat$Year &
+           Month %in% Present.dat$Month)
+
+dim(Absent.ToTunique.yrmon)
+# [1] 20 19
+
+```
+
+## For shared Cruise and Date values, bind rows
+
+```{r, presence.absence.col.pt3.1}
+
+#-------------------------------------------------------------------------------
+# For when a shared date exists
+#-------------------------------------------------------------------------------
+
+# Define keys
+join_keys <- c("Cruise", "Date")
+
+cruise.date.dat <- Present.dat %>%
+  group_by(age, len_bin) %>%
+  group_split() %>%
+  map_df(~ {
+    present_grp <- .x
+
+    # Get rows from Absent.dat.all that match on Cruise
+    absent_matches <- Absent.matched.time %>%
+      filter(Cruise %in% Present.dat$Cruise & 
+               Date %in% Present.dat$Date) %>%
+      semi_join(present_grp, by = join_keys) %>%
+      mutate(age = unique(present_grp$age),
+         len_bin = unique(present_grp$len_bin))
+
+    # Append matched Absent rows to this group
+    bind_rows(present_grp, absent_matches)
+  })
+
+```
+
+## For shared Cruise and Year Month values, bind rows
+
+```{r, presence.absence.col.pt3.2}
+
+# Define keys
+join_keys <- c("Cruise", "Year", "Month")
+
+cruise.yrmon.dat <- Present.dat %>%
+  group_by(age, len_bin) %>%
+  group_split() %>%
+  map_df(~ {
+    present_grp <- .x
+
+    # Get rows from Absent.dat.all that match on Cruise
+    absent_matches <- Absent.matched.yrmon %>%
+      filter(Cruise %in% Present.dat$Cruise &
+               !Date %in% Present.dat$Date &
+               Year %in% Present.dat$Year &
+               Month %in% Present.dat$Month) %>%
+      semi_join(present_grp, by = join_keys) %>%
+      mutate(age = unique(present_grp$age),
+         len_bin = unique(present_grp$len_bin))
+
+    # Append matched Absent rows to this group
+    bind_rows(present_grp, absent_matches)
+  })
+
+```
+
+## For non-shared Cruise data and Date only, bind rows
+
+```{r, presence.absence.col.pt3.3}
+
+# Define keys
+join_keys <- c("Date")
+
+date.dat.only <- Present.dat %>%
+  group_by(age, len_bin) %>%
+  group_split() %>%
+  map_df(~ {
+    present_grp <- .x
+
+    # Get rows from Absent.dat.all that match on Cruise
+    absent_matches <- Absent.ToTunique.date %>%
+      filter(!Cruise %in% Present.dat$Cruise &
+               Date %in% Present.dat$Date) %>%
+      semi_join(present_grp, by = join_keys) %>%
+      mutate(age = unique(present_grp$age),
+         len_bin = unique(present_grp$len_bin))
+
+    # Append matched Absent rows to this group
+    bind_rows(present_grp, absent_matches)
+  })
+
+```
+
+## For non-shared Cruise data and Year Month only, bind rows
+
+```{r, presence.absence.col.pt3.4}
+
+# Define keys
+join_keys <- c("Year", "Month")
+
+yrmon.dat.only <- Present.dat %>%
+  group_by(age, len_bin) %>%
+  group_split() %>%
+  map_df(~ {
+    present_grp <- .x
+
+    # Get rows from Absent.dat.all that match on Cruise
+    absent_matches <- Absent.ToTunique.yrmon %>%
+      filter(!Cruise %in% Present.dat$Cruise &
+               !Date %in% Present.dat$Date &
+               Year %in% Present.dat$Year &
+               Month %in% Present.dat$Month) %>%
+      semi_join(present_grp, by = join_keys) %>%
+      mutate(age = unique(present_grp$age),
+         len_bin = unique(present_grp$len_bin))
+
+    # Append matched Absent rows to this group
+    bind_rows(present_grp, absent_matches)
+  })
+
+```
+
+## Join back everything
+
+```{r, join.full.data.presense.absence}
+
+Full.dat <- rbind(cruise.date.dat, cruise.yrmon.dat, date.dat.only, yrmon.dat.only) %>%
+  distinct() %>%
+  # Reorder chronologically
+  arrange(NumericQuarter)  %>%
+  mutate(YearQuarter.dup = as.numeric(NumericQuarter))
+
+summary(Full.dat)
+
+unique(Full.dat$PA)
+
+```
+
+# Regroup Quarts as 2 Seasons
+
+There is moderate to strong temporal autocorrelation in the model as the modelling mean absolute error is significantly reduced by inclusion of temporal effects. However the spatial effects are not be well captured.
+
+```{r, 2season.structure}
+
+TwoSeas.dat <- Full.dat %>%
+  mutate(
+    Season = case_when(
+      month(Date) %in% 1:6 ~ "S1",
+      month(Date) %in% 7:12 ~ "S2"
+      ),
+    # Create combined time step variable using year and season
+    YearSeas = paste(year(Date), Season, sep = ""),
+     Season.nm =  
+      case_when(
+      grepl("S1", Season) ~ 1,
+      grepl("S2", Season) ~ 2
+      ),
+    # Combine year and numeric season
+    YearSeas.nm = (Year + (Season.nm - 1) / 10),
+    YearSeas.dup = as.numeric(YearSeas.nm))
+# View(TwoSeas.dat)  
+
+unique(TwoSeas.dat$YearSeas)
+unique(TwoSeas.dat$YearSeas.nm)
+
+```
+
+# Find Missing Seasons
+
+```{r, missing.seasons}
+
+# Generate complete sequence
+# Define the range of years
+years <- 2003:2024
+
+# Create the sequence of year-season combinations
+year_season_sequence <- data.frame(
+  YearSeas.nm = unlist(lapply(years, function(year) {
+  # For each year, create two entries: season 1 (0.0) and season 2 (0.1)
+  ## year + 0/10 gives 2003.0,while year + 1/10 gives 2003.1
+  c(year + 0 / 10, year + 1 / 10)  
+}))
+)
+
+# Print the resulting sequence
+year_season_sequence
+
+missing_seas <- year_season_sequence %>%
+  anti_join(TwoSeas.dat, by = "YearSeas.nm") %>%
+  select(YearSeas.nm)
+
+missing_seas
+
+```
+
+# Create summaries
+
+## For individuals less than 175 mm
+
+```{r, length.bin.less.than.175mm}
+
+less175 <- TwoSeas.dat %>%
+  filter(len_bin %in% c("100", "125", "150", "175")) %>%
+  # Drop age and collapse len_bin
+  group_by(Cruise, Year, Month, Day, clstGRP, Hauls, NbClust, Area_id, Area_km2,
+           Date, YearQuarter, Quarter, NumericQuarter, X, Y, PA, YearQuarter.dup,
+           Season, YearSeas, Season.nm, YearSeas.nm, YearSeas.dup, vals) %>%
+  summarise(WghtLenBin = sum(WghtLenBin), .groups = "keep") %>%
+  mutate(lengths = "< 175 mm", 
+         Density = WghtLenBin/Area_km2)
+
+dim(less175)
+# [1] 1059   26
+
+dim(distinct(less175))
+# [1] 1059   26
+
+less175 <- less175 %>%
+  mutate(Density.tr = log1p(Density))
+
+# View(less175)
+
+#-------------------------------------------------------------------------------
+# Map density
+#-------------------------------------------------------------------------------
+
+# Base map
+less175.den.map <- 
+  ggplot() +
+  geom_point(data = less175, aes(x=X,y=Y, col = Density)) +
+  scale_color_viridis_c() +
+  facet_wrap(~YearSeas) +
+  title("Density by Year Season for lengths < 175 mm") +
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("less175.den.map.jpeg",sep=''),
+        less175.den.map, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+# Log transformed map
+less175.den.tr.map <- 
+  ggplot() +
+  geom_point(data = less175, aes(x=X,y=Y, col = Density.tr)) +
+  scale_color_viridis_c() +
+  facet_wrap(~YearSeas) +
+  title("Density (ln(x+1)) by Year Season for lengths < 175 mm") +
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("less175.den.tr.map.jpeg",sep=''),
+        less175.den.tr.map, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+#-------------------------------------------------------------------------------
+# Separate positive densities
+#-------------------------------------------------------------------------------
+
+less175.pres <- less175 %>%
+  filter(PA == 1) 
+
+# Explore range (note 0.0 is an artefact of rounding precision)
+range(less175.pres$Density)
+# [1] 0.0 940504.5
+
+#-------------------------------------------------------------------------------
+# Histogram figs
+#-------------------------------------------------------------------------------
+
+# For base histogram
+less175.pres.den.hist <-
+  ggplot() +
+  geom_histogram(data = less175.pres,
+                 aes(x = Density, y = ..density..), 
+                 bins = 50,  # You can adjust the number of bins or use binwidth
+                 fill = "orange", color = "black", alpha = 0.7) + 
+  facet_wrap(~YearSeas) +
+  labs(title = "Histogram of Density by Year Season for lengths < 175 mm", 
+       x = "Density", y = "Density (f(x))") +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_continuous(expand = c(0, 0)) +
+  # Clean, minimal theme
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("less175.pres.den.hist.jpeg",sep=''),
+        less175.pres.den.hist, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+# For log transformed histogram
+less175.pres.den.tr.hist <-
+ggplot() +
+  geom_histogram(data = less175.pres,
+                 aes(x = Density.tr, y = ..density..), 
+                 bins = 50,  # You can adjust the number of bins or use binwidth
+                 fill = "orange", color = "black", alpha = 0.7) + 
+  facet_wrap(~YearSeas) +
+  labs(title = "Histogram of Density by Year Season for lengths < 175 mm", 
+       x = "Density (ln(x+1))", y = "Density (f(ln(x+1)))") +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_continuous(expand = c(0, 0)) +
+  # Clean, minimal theme
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("less175.pres.den.tr.hist.jpeg",sep=''),
+        less175.pres.den.tr.hist, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+#-------------------------------------------------------------------------------
+# Boxplot figs
+#-------------------------------------------------------------------------------
+
+# For base boxplot
+less175.pres.den.boxplot <-
+  ggplot() +
+  geom_boxplot(data = less175.pres, 
+               aes(x = YearSeas, y = Density),
+               fill = "orange", 
+               color = "black", alpha = 0.7) +
+  labs(title = "Density by Year Season for lengths < 175 mm", 
+       x = "Year Season", y = "Density (x)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 60, vjust = .5, hjust=.50),
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("less175.pres.den.boxplot.jpeg",sep=''),
+        less175.pres.den.boxplot, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+# For log transformed boxplot
+less175.pres.den.tr.boxplot <-
+  ggplot() +
+  geom_boxplot(data = less175.pres, 
+               aes(x = YearSeas, y = Density.tr),
+               fill = "orange", 
+               color = "black", alpha = 0.7)  +
+  labs(title = "Density by Year Season for lengths < 175 mm", 
+       x = "Year Season", y = "Density (x)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 60, vjust = .5, hjust=.50),
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("less175.pres.den.tr.boxplot.jpeg",sep=''),
+        less175.pres.den.tr.boxplot, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+```
+
+## For individuals greater than 175 mm
+
+```{r, length.bin.greater.than.175mm}
+
+greater175 <- TwoSeas.dat %>%
+  filter(len_bin %in% c("200", "225", "250+")) %>%
+  # Drop age and collapse len_bin
+  group_by(Cruise, Year, Month, Day, clstGRP, Hauls, NbClust, Area_id, Area_km2,
+           Date, YearQuarter, Quarter, NumericQuarter, X, Y, PA, YearQuarter.dup,
+           Season, YearSeas, Season.nm, YearSeas.nm, YearSeas.dup, vals) %>%
+  summarise(WghtLenBin = sum(WghtLenBin), .groups = "keep") %>%
+  mutate(lengths = "> 175 mm", 
+         Density = WghtLenBin/Area_km2)
+
+dim(greater175)
+# [1] 1283   26
+
+dim(distinct(greater175))
+# [1] 1283   26
+
+greater175 <- greater175 %>%
+  mutate(Density.tr = log1p(Density))
+
+# View(greater175)
+
+#-------------------------------------------------------------------------------
+# Map density
+#-------------------------------------------------------------------------------
+
+# Base map
+greater175.den.map <- 
+  ggplot() +
+  geom_point(data = greater175, aes(x=X,y=Y, col = Density)) +
+  scale_color_viridis_c() +
+  facet_wrap(~YearSeas) +
+  title("Density by Year Season for lengths > 175 mm") +
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("greater175.den.map.jpeg",sep=''),
+        greater175.den.map, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+# Log transformed map
+greater175.den.tr.map <- 
+  ggplot() +
+  geom_point(data = greater175, aes(x=X,y=Y, col = Density.tr)) +
+  scale_color_viridis_c() +
+  facet_wrap(~YearSeas) +
+  title("Density (ln(x+1)) by Year Season for lengths > 175 mm") +
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("greater175.den.tr.map.jpeg",sep=''),
+        greater175.den.tr.map, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+#-------------------------------------------------------------------------------
+# Separate positive densities
+#-------------------------------------------------------------------------------
+
+greater175.pres <- greater175 %>%
+  filter(PA == 1) 
+
+# Explore range (note 0.0 is an artefact of rounding precision)
+range(greater175.pres$Density)
+# [1] 0.0 940504.5
+
+
+#-------------------------------------------------------------------------------
+# Histogram figs
+#-------------------------------------------------------------------------------
+
+# For base histogram
+greater175.pres.den.hist <-
+  ggplot() +
+  geom_histogram(data = greater175.pres,
+                 aes(x = Density, y = ..density..), 
+                 bins = 50,  # You can adjust the number of bins or use binwidth
+                 fill = "lightgreen", color = "black", alpha = 0.7) + 
+  facet_wrap(~YearSeas) +
+  labs(title = "Histogram of Density by Year Season for lengths > 175 mm", 
+       x = "Density", y = "Density (f(x))") +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_continuous(expand = c(0, 0)) +
+  # Clean, minimal theme
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("greater175.pres.den.hist.jpeg",sep=''),
+        greater175.pres.den.hist, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+# For log transformed histogram
+greater175.pres.den.tr.hist <-
+ggplot() +
+  geom_histogram(data = greater175.pres,
+                 aes(x = Density.tr, y = ..density..), 
+                 bins = 50,  # You can adjust the number of bins or use binwidth
+                 fill = "lightgreen", color = "black", alpha = 0.7) + 
+  facet_wrap(~YearSeas) +
+  labs(title = "Histogram of Density by Year Season for lengths > 175 mm", 
+       x = "Density (ln(x+1))", y = "Density (f(ln(x+1)))") +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_continuous(expand = c(0, 0)) +
+  # Clean, minimal theme
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("greater175.pres.den.tr.hist.jpeg",sep=''),
+        greater175.pres.den.tr.hist, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+#-------------------------------------------------------------------------------
+# Boxplot figs
+#-------------------------------------------------------------------------------
+
+# For base boxplot
+greater175.pres.den.boxplot <-
+  ggplot() +
+  geom_boxplot(data = greater175.pres, 
+               aes(x = YearSeas, y = Density),
+               fill = "lightgreen", 
+               color = "black", alpha = 0.7) +
+  labs(title = "Density by Year Season for lengths > 175 mm", 
+       x = "Year Season", y = "Density (x)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 60, vjust = .5, hjust=.50),
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("greater175.pres.den.boxplot.jpeg",sep=''),
+        greater175.pres.den.boxplot, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+# For log transformed boxplot
+greater175.pres.den.tr.boxplot <-
+  ggplot() +
+  geom_boxplot(data = greater175.pres, 
+               aes(x = YearSeas, y = Density.tr),
+               fill = "lightgreen", 
+               color = "black", alpha = 0.7)  +
+  labs(title = "Density by Year Season for lengths > 175 mm", 
+       x = "Year Season", y = "Density (x)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 60, vjust = .5, hjust=.50),
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("greater175.pres.den.tr.boxplot.jpeg",sep=''),
+        greater175.pres.den.tr.boxplot, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+```
+
+## For individuals by age
+
+```{r, age.bin.only}
+
+ageDens <- TwoSeas.dat %>%
+  # Drop len_bin and collapse age
+  group_by(Cruise, Year, Month, Day, clstGRP, Hauls, NbClust, Area_id, Area_km2,
+           Date, YearQuarter, Quarter, NumericQuarter, X, Y, PA, YearQuarter.dup,
+           Season, YearSeas, Season.nm, YearSeas.nm, YearSeas.dup, vals, age) %>%
+  summarise(WghtLenBin = sum(WghtLenBin), .groups = "keep") %>%
+  mutate(Density = WghtLenBin/Area_km2)
+
+dim(ageDens)
+# [1] 8200   26
+
+dim(distinct(ageDens))
+# [1] 8200   26
+
+ageDens <- ageDens %>%
+  mutate(Density.tr = log1p(Density))
+
+# View(ageDens)
+
+#-------------------------------------------------------------------------------
+# Map density
+#-------------------------------------------------------------------------------
+
+# Base map
+ageDens.den.map <- 
+  ggplot() +
+  geom_point(data = ageDens, aes(x=X,y=Y, col = Density)) +
+  scale_color_viridis_c() +
+  facet_grid(age ~ YearSeas) +
+  # Clean, minimal theme
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("ageDens.den.map.jpeg",sep=''),
+        ageDens.den.map, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+# Log transformed map
+ageDens.den.tr.map <- 
+  ggplot() +
+  geom_point(data = ageDens, aes(x=X,y=Y, col = Density.tr)) +
+  scale_color_viridis_c() +
+  facet_grid(age ~ YearSeas) +
+  # Clean, minimal theme
+  theme_bw() +  
+  # Customizing facet labels
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12, face = "bold"))
+
+ggsave2(filename=paste("ageDens.den.tr.map.jpeg",sep=''),
+        ageDens.den.tr.map, device="jpeg", 
+        path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+        unit="cm", limitsize = FALSE)
+
+#-------------------------------------------------------------------------------
+# Separate positive densities
+#-------------------------------------------------------------------------------
+
+ageDens.pres <- ageDens %>%
+  filter(PA == 1) 
+
+# Explore range (note 0.0 is an artefact of rounding precision)
+range(ageDens.pres$Density)
+# [1] 0.0 940504.5
+
+
+#-------------------------------------------------------------------------------
+# Figures
+#-------------------------------------------------------------------------------
+
+for (a in unique(ageDens.pres$age)) {
+  ageDens.pres.set <- ageDens.pres[ageDens.pres$age == a, ]
+  age = unique(ageDens.pres.set$age)
+  print(age)
+  
+  #-----------------------------------------------------------------------------
+  # Map density
+  #-----------------------------------------------------------------------------
+
+  # Base map
+  ageDens.den.map <- 
+    ggplot() +
+    geom_point(data = ageDens, aes(x=X,y=Y, col = Density)) +
+    scale_color_viridis_c() +
+    facet_wrap(~ YearSeas) +
+    labs(title = paste("Density by Year Season for age: ", age, sep="")) +
+    theme_bw() + 
+    # Customizing facet labels
+    theme(strip.text = element_text(size = 12, face = "bold"),
+          axis.text = element_text(size = 10), 
+          axis.title = element_text(size = 12, face = "bold"))
+
+  ggsave2(filename=paste("age-", age, "_Dens.den.map.jpeg",sep=''),
+          ageDens.den.map, device="jpeg", 
+          path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+          unit="cm", limitsize = FALSE)
+
+  # Log transformed map
+  ageDens.den.tr.map <- 
+    ggplot() +
+    geom_point(data = ageDens, aes(x=X,y=Y, col = Density.tr)) +
+    scale_color_viridis_c() +
+    facet_wrap(~YearSeas) +
+    labs(title = paste("Density (ln(x+1)) by Year Season for age: ", age, sep="")) +
+    theme_bw() +  
+    # Customizing facet labels
+    theme(strip.text = element_text(size = 12, face = "bold"),
+          axis.text = element_text(size = 10), 
+          axis.title = element_text(size = 12, face = "bold"))
+
+  ggsave2(filename=paste("age-", age, "_Dens.den.tr.map.jpeg",sep=''),
+          ageDens.den.tr.map, device="jpeg", 
+          path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+          unit="cm", limitsize = FALSE)
+  
+  #-----------------------------------------------------------------------------
+  # Histogram figures
+  #-----------------------------------------------------------------------------
+
+  # For base histogram
+  ageDens.pres.den.hist <-
+    ggplot() +
+    geom_histogram(data = ageDens.pres.set,
+                   aes(x = Density, y = ..density..), 
+                   bins = 50,  # You can adjust the number of bins or use binwidth
+                   fill = "lightblue", color = "black", alpha = 0.7) + 
+    labs(title = paste("Histogram of Density by Year Season for age: ", age, sep=""), 
+         x = "Density", y = "Density (f(x))") +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_x_continuous(expand = c(0, 0)) +
+    theme_bw() +  
+    # Customizing facet labels
+    theme(strip.text = element_text(size = 12, face = "bold"),
+          axis.text = element_text(size = 10), 
+          axis.title = element_text(size = 12, face = "bold"))
+
+  ggsave2(filename=paste("age-", age, "_Dens.pres.den.hist.jpeg",sep=''),
+          ageDens.pres.den.hist, device="jpeg", 
+          path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+          unit="cm", limitsize = FALSE)
+
+  # For log transformed histogram
+  ageDens.pres.den.tr.hist <-
+    ggplot() +
+    geom_histogram(data = ageDens.pres.set,
+                   aes(x = Density.tr, y = ..density..), 
+                   bins = 50,  # You can adjust the number of bins or use binwidth
+                   fill = "lightblue", color = "black", alpha = 0.7) + 
+    labs(title = paste("Histogram of Density by Year Season for age: ", age, sep=""),
+         x = "Density (ln(x+1))", y = "Density (f(ln(x+1)))") +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_x_continuous(expand = c(0, 0)) +
+    theme_bw() +  
+    # Customizing facet labels
+    theme(strip.text = element_text(size = 12, face = "bold"),
+          axis.text = element_text(size = 10), 
+          axis.title = element_text(size = 12, face = "bold"))
+
+  ggsave2(filename=paste("age-", age, "_Dens.pres.den.tr.hist.jpeg",sep=''),
+          ageDens.pres.den.tr.hist, device="jpeg", 
+          path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+          unit="cm", limitsize = FALSE)
+
+  #-----------------------------------------------------------------------------
+  # Boxplot figs
+  #-----------------------------------------------------------------------------
+
+  # For base boxplot
+  ageDens.pres.den.boxplot <-
+    ggplot() +
+    geom_boxplot(data = ageDens.pres.set, 
+                 aes(x = YearSeas, y = Density),
+                 fill = "lightblue", 
+                 color = "black", alpha = 0.7) +
+    facet_wrap(~age) %>%
+    labs(title = paste("Density by Year Season for age: ", age, sep=""), 
+         x = "Year Season", y = "Density (x)") +
+    theme_bw() +
+    theme(strip.text = element_text(size = 12, face = "bold"),
+          axis.text.y = element_text(size = 10),
+          axis.text.x = element_text(size = 10, angle = 60, vjust = .5, hjust=.50),
+          axis.title = element_text(size = 12, face = "bold"))
+
+  ggsave2(filename= paste("age-", age, "_Dens.pres.den.boxplot.jpeg",sep=''),
+          ageDens.pres.den.boxplot, device="jpeg", 
+          path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+          unit="cm", limitsize = FALSE)
+
+  # For log transformed boxplot
+  ageDens.pres.den.tr.boxplot <-
+    ggplot() +
+    geom_boxplot(data = ageDens.pres.set, 
+                 aes(x = YearSeas, y = Density.tr),
+                 fill = "lightblue", 
+                 color = "black", alpha = 0.7) +
+    facet_wrap(~age) %>%
+    labs(title = paste("Density by Year Season for age: ", age, sep=""), 
+         x = "Year Season", y = "Density (x)") +
+    theme_bw() +
+    theme(strip.text = element_text(size = 12, face = "bold"),
+          axis.text.y = element_text(size = 10),
+          axis.text.x = element_text(size = 10, angle = 60, vjust = .5, hjust=.50),
+          axis.title = element_text(size = 12, face = "bold"))
+
+  ggsave2(filename=paste("age-", age, "_Dens.pres.den.tr.boxplot.jpeg",sep=''),
+          ageDens.pres.den.tr.boxplot, device="jpeg", 
+          path=paste(dir, "/Figures",sep=""), dpi=1200, width = 29, height=21, 
+          unit="cm", limitsize = FALSE)
+  }
+
+```
+
+# Test/Train Split With Season
+ 
+Split 28 quarters (16 years) for training and 10 quarters (5 years) for out-of-model testing. For the time_series_split function, you need to have a datetime object. 
+
+```{r, split.data2}
+
+tims2 <- data.frame("YearSeas" = sort(unique(TwoSeas.dat$YearSeas))) %>%
+  arrange(YearSeas)  # ensures sorted order
+
+# Single split: 75% train, last 3 time points as test
+split <- timetk::time_series_split(
+  tims2,
+  date_var = YearSeas,
+  initial = floor(0.75 * nrow(tims2)),
+  assess = ceiling(0.25 * nrow(tims2))
+)
+
+# Create training set
+train_dates2 <- rsample::training(split)
+train2 <- subset(TwoSeas.dat, YearSeas %in% train_dates2$YearSeas)
+tail(train2$YearSeas)
+
+fwrite(train2, here(dir, "Data", "ExampleRun", "train2"))
+
+# Create test set
+test_dates2  <- rsample::testing(split)
+test2 <- subset(TwoSeas.dat, YearSeas %in% test_dates2$YearSeas) 
+head(test2$YearSeas)
+
+fwrite(test2, here(dir, "Data", "ExampleRun", "test2"))
+
+# Define extra time steps to estimate
+est.missing.time2 <- unique(c(missing_seas$YearSeas.nm, test2$YearSeas.nm)) %>%
+  sort
+
+save(est.missing.time2, file = here(dir, "Data", "ExampleRun",
+                                    "est.missing.time2.rda"))
+
+```
+
+# Construct the Seasonal Mesh: 
+
+see https://pbs-assess.github.io/sdmTMB/articles/basic-intro.html: cutoff is in the units of X and Y (km here), represents minimum distance between knots before a new mesh vertex is added). Muhling et al., 2025 tried a bunch of cutoff values, and chose one that 1) had good out-of-sample predictability, and 2) wasn't too "blocky". They found Values between ~ 50 and 200 were fairly reasonable. 
+
+Here we look at the distance between clusters to assign knots using the summary function.
+
+Important: cannot use anisotropy with barrier mesh (see warning when run sdmTMB).
+
+## Extract and Save Land Barrier Shapefile
+
+```{r, construct.mesh}
+
+# Read full resolution - Continental land masses and ocean islands, except Antarctica.
+land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "gshhg-shp-2.3.7",
+                             "GSHHS_shp", "f", "GSHHS_f_L1.shp")) %>%
+  # Project to same coordinate system
+  st_transform(crs = st_crs(area2poly.dens)) %>%
+  # Trim to area extent
+  st_crop(st_bbox(area2poly.dens))
+
+plot(land.barrier)
+
+# Filter geometry type
+land.barrier <- land.barrier[st_geometry_type(land.barrier) %in%
+                               c("POLYGON", "MULTIPOLYGON"), ] %>%
+  st_union()
+
+# Wrap back into sf object
+land.barrier <- st_sf(geometry = land.barrier)
+
+# Check that union worked
+st_is_valid(land.barrier)
+# [1] TRUE
+
+# Drop levels
+land.barrier <- land.barrier %>% mutate(across(where(is.factor), droplevels))
+
+st_write(land.barrier, here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+
+```
+
+## Apply Training and Land Barrier Data and Construct
+
+```{r, construct.seasonal.mesh}
+
+# Cutoff values control the minimum distance between knots.
+## It is generally better to start with a coarser mesh (larger cutoff)
+## However there is a tradeoff on spatial predictability (more knots) and
+## over fitting the time to process. If the day is irregularly distributed
+## you can also try residual-based knot placement
+meshTrain2 <- make_mesh(train2, xy_cols = c("X", "Y"), cutoff = 50) 
+
+# Check number of mesh nodes 
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(meshTrain2$mesh$loc[,1])
+# [1] 212
+
+# proj_scaling should match units of (since we are working in m, but density
+# is in km, divide by 1000)
+barrier2 <- add_barrier_mesh(meshTrain2, land.barrier, proj_scaling = 1000)
+
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(barrier2$mesh$loc[,1])
+# [1] 604
+
+# Example plot code from ?add_barrier_mesh
+mesh_df_water2 <- barrier2$mesh_sf[barrier2$normal_triangles, ]
+mesh_df_land2 <- barrier2$mesh_sf[barrier2$barrier_triangles, ]
+
+Mesh.with.barrier2 <-
+ggplot() +
+  geom_sf(data = land.barrier) +
+  geom_sf(data = mesh_df_water2, size = 1, colour = "blue") +
+  geom_sf(data = mesh_df_land2, size = 1, colour = "green")
+
+Mesh.with.barrier2
+# [1] 231
+
+plot(barrier2)
+points(train2$X, train2$Y, col = "red", pch = 19, 
+       cex = 0.2)
+
+# Define extra time steps to estimate
+est.missing.time2 <- unique(c(missing_seas$YearSeas.nm, test2$YearSeas.nm)) %>%
+  sort
+
+```
+
