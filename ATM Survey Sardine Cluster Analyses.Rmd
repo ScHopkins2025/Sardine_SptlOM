@@ -978,6 +978,10 @@ area.transects.buff <- st_buffer(area.transects.final, units::as_units(100,"m"),
                                  max_cells=1e5)
 # View(area.transects.buff)
 
+# Test the buffer was applied correctly; should be false
+identical(area.transects.final$geometry, area.transects.buff$geometry)
+# [1] FALSE
+
 #-------------------------------------------------------------------------------
 # Adjust names for clarity
 #-------------------------------------------------------------------------------
