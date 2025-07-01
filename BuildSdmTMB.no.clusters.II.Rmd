@@ -1,0 +1,192 @@
+---
+title: "BuildSdmTMB"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    
+---
+
+```{r setup, include=FALSE}
+
+# Run first if not already installed
+# remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
+#  
+
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
+              "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg",
+              "ggforce", # enables plot_anisotropy
+              "spatstat" # Get summary table for nearest neighbour) 
+              )
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+sf_use_s2(FALSE)
+
+dir <- here(getwd())
+
+```
+
+# Load YearSeason data
+
+```{r, load.seasonal.data}
+
+# Load new sdm data
+TwoSeas.dat2 <- fread(here(dir, "Data", "TwoSeas.dat2.no.clust"))
+
+# Load YearSeason gaps to fill
+load(file = here(dir, "Data", "ExampleRun",
+                                    "est.missing.time2.rda"))
+
+```
+
+# Creat Mesh
+
+```{r, construct.mesh}
+
+# Filter the data frame
+TwoSeas.dat2_filtered <- 
+  TwoSeas.dat2[TwoSeas.dat2$X >= min(TwoSeas.dat2$X) & 
+                 TwoSeas.dat2$X <= max(TwoSeas.dat2$X) & 
+                 TwoSeas.dat2$Y >= min(TwoSeas.dat2$Y) & 
+                 TwoSeas.dat2$Y <= max(TwoSeas.dat2$Y), ]
+
+# Read full resolution - Continental land masses and ocean islands, except Antarctica.
+land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+plot(land.barrier)
+
+# Cutoff values control the minimum distance between knots.
+## It is generally better to start with a coarser mesh (larger cutoff)
+## However there is a tradeoff on spatial predictability (more knots) and
+## over fitting the time to process. If the day is irregularly distributed
+## you can also try residual-based knot placement
+meshTwoSeas.dat2_filtered <- make_mesh(TwoSeas.dat2_filtered, xy_cols = c("X", "Y"), cutoff = 50) 
+
+# Check number of mesh nodes 
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(meshTwoSeas.dat2_filtered$mesh$loc[,1])
+# [1] 266
+
+plot(meshTwoSeas.dat2_filtered)
+points(TwoSeas.dat2_filtered$X, TwoSeas.dat2_filtered$Y, col = "red", pch = 19, 
+       cex = 0.2)
+
+```
+
+
+# Creat Barrier Mesh
+
+
+```{r, construct.barrier.mesh}
+
+# proj_scaling should match units of (since we are working in m, but density
+# is in km, divide by 1000)
+barrier2 <- add_barrier_mesh(meshTwoSeas.dat2, land.barrier, proj_scaling = 1000)
+
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(barrier2$mesh$loc[,1])
+# [1] 266
+
+# Example plot code from ?add_barrier_mesh
+mesh_df_water2 <- barrier2$mesh_sf[barrier2$normal_triangles, ]
+mesh_df_land2 <- barrier2$mesh_sf[barrier2$barrier_triangles, ]
+
+Mesh.with.barrier2 <-
+ggplot() +
+  geom_sf(data = land.barrier) +
+  geom_sf(data = mesh_df_water2, size = 1, colour = "blue") +
+  geom_sf(data = mesh_df_land2, size = 1, colour = "green")
+
+Mesh.with.barrier2
+
+plot(barrier2)
+points(TwoSeas.dat2$X, TwoSeas.dat2$Y, col = "red", pch = 19, 
+       cex = 0.2) 
+
+```
+
+# Model 1: Dnsty_n_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1"
+
+```{r, density.by.yearseas.ar1}
+
+set.seed(1) 
+
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit1 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = TwoSeas.dat2_filtered, 
+               mesh = meshTwoSeas.dat2_filtered,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = est.missing.time2,
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit1)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+##------------------------------------------------------------------------------
+## ✖ `sigma_E` is larger than 100
+## ℹ Consider simplifying the model or adding priors
+##
+#### Large values of sigma_E indicate that there is a high level of spatial 
+#### variation that your model has not explained. 
+##------------------------------------------------------------------------------
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit1)
+## M1:
+#### Spatiotemporal AR1 correlation (rho): 0.08
+#### Matérn range: 82.73
+#### Spatial SD: 81.67
+#### Spatiotemporal marginal AR1 SD:  625.07
+
+## M2:
+#### Dispersion Parameter: 0.45 (Good, typical range: 0.5-1.5)
+#### Spatiotemporal AR1 Correlation (rho): 0.44 (Moderate to strong, 
+## typical range: 0.4 - 0.8)
+#### Matérn Range: 119.278 (Good, typical range: 50-200 depending on scale)
+#### Spatial SD: 10.11
+#### Spatiotemporal Marginal AR1 SD: 47.38 (Good, typical range: 10-50)
+#### ML Criterion: 4289.604 (Best used for model comparison, not absolute assessment)
+
+# Predict (gives a whole new df, unlike GAM)
+p1TwoSeas.dat2 <- predict(fit1, newdata = p1TwoSeas.dat2, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Dnsty_n_3 ~ est, data = p1TwoSeas.dat2))$r.squared # 0.140585
+
+# MAE
+mean(abs(p1TwoSeas.dat2$Dnsty_n_3 - p1TwoSeas.dat2$est)) # 314.6031
+
+mean(TwoSeas.dat2$Dnsty_n_3)
+# [1] 231.8522
+sd(TwoSeas.dat2$Dnsty_n_3)
+# [1] 11672.67
+
+```
