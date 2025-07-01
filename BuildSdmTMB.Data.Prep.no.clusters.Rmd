@@ -12,14 +12,14 @@ output:
 
 # Run first if not already installed
 # remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
-# remotes::install_github("pbs-assess/sdmTMB")
+# remotes::install_github("pbs-assess/sdmTMB", dependencies = TRUE)
 
 rm(list=ls())
 gc()
 
 load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
               "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg",
-              "ggforce", # enables plot_anisotropy
+              "utils", "ggforce", # enables plot_anisotropy
               "spatstat",# Get summary table for nearest neighbor
               "rsample", "timetk", "zoo") 
 
@@ -72,6 +72,28 @@ plotNormalDensity(full.dat$Dnsty_n_3)
 
 ```
 
+## Load Coastal Geometry
+
+```{r, load.land.shp}
+
+land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+
+# Read full resolution - Continental land masses and ocean islands, except Antarctica.
+##land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "gshhg-shp-2.3.7",
+##                             "GSHHS_shp", "f", "GSHHS_f_L1.shp")) %>%
+### Project to same coordinate system
+##st_transform(crs = st_crs(TwoSeas.dat)) %>%
+### Trim to area extent
+##  st_crop(st_bbox(TwoSeas.dat))
+
+# write_sf(land.barrier, here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+
+plot(land.barrier)
+
+
+
+```
+
 # Regroup data 2 Seasons
 
 There is moderate to strong temporal autocorrelation in the model as the modelling mean absolute error is significantly reduced by inclusion of temporal effects. However the spatial effects are not be well captured.
@@ -97,6 +119,11 @@ TwoSeas.dat <- full.dat %>%
 
 unique(TwoSeas.dat$YearSeas)
 unique(TwoSeas.dat$YearSeas.nm)
+
+
+# Remove 2003 and 2007 data
+TwoSeas.dat <- TwoSeas.dat %>%
+  filter(!Year %in% c(2003, 2007))
 
 ```
 
@@ -128,7 +155,46 @@ missing_seas
 
 ```
 
-## Create X Y columns
+## Find missing time steps
+
+```{r}
+
+# Define all levels for Year Quarter, combining training data and extra_time (numeric)
+all_levels2 <- sort(unique(c(TwoSeas.dat$YearSeas.nm, missing_seas$YearSeas.nm)))
+
+# Define extra time steps to estimate
+est.missing.time2 <- unique(missing_seas$YearSeas.nm) %>%
+  sort
+
+save(est.missing.time2, file = here(dir, "Data", "ExampleRun",
+                                    "est.missing.time2.rda"))
+
+```
+
+# Explore the data
+
+Because we have sparse data with biased sampling, remove 2003 and 2007 where sampling occured over a limited range and where there are problems in estimated transect location.
+
+```{r, simplify.model}
+
+TwoSeas.dat.0s <- TwoSeas.dat %>%
+  filter(sciname == "Other")
+
+TwoSeas.sar <- TwoSeas.dat %>%
+  filter(sciname != "Other")
+
+ggplot() +
+  geom_sf(data = land.barrier, fill = "palegreen") +
+  geom_sf(data = TwoSeas.dat.0s, ol = "darkred") +
+  geom_sf(data = TwoSeas.sar, col = "black")
+
+st_bbox(TwoSeas.sar)
+#       xmin       ymin       xmax       ymax 
+#  -248448.9 -1218974.1   946410.3  1136329.6
+
+```
+
+# Create X Y columns
 
 ```{r, x.y.columns}
 
@@ -144,67 +210,44 @@ fwrite(TwoSeas.dat2, here(dir, "Data", "TwoSeas.dat2.no.clust"))
 
 ```
 
-## Find missing time steps
-
-```{r}
-
-# Define all levels for Year Quarter, combining training data and extra_time (numeric)
-all_levels2 <- sort(unique(c(TwoSeas.dat2$YearSeas.dup, missing_seas$YearSeas.nm)))
-
-# Define extra time steps to estimate
-est.missing.time2 <- unique(missing_seas$YearSeas.nm) %>%
-  sort
-
-save(est.missing.time2, file = here(dir, "Data", "ExampleRun",
-                                    "est.missing.time2.rda"))
-
-```
-
 # Construct the Seasonal Mesh: 
-
-## Load Coastal Geometry
-
-```{r, load.land.shp}
-
-# Read full resolution - Continental land masses and ocean islands, except Antarctica.
-land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "gshhg-shp-2.3.7",
-                             "GSHHS_shp", "f", "GSHHS_f_L1.shp")) %>%
-  # Project to same coordinate system
-  st_transform(crs = st_crs(TwoSeas.dat)) %>%
-  # Trim to area extent
-  st_crop(st_bbox(TwoSeas.dat))
-
-plot(land.barrier)
-
-write_sf(land.barrier, here(dir, "Data", "Shapefiles", "land.barrier.shp"))
-
-```
 
 ## Creat Barrier Mesh
 
 ```{r, construct.barrier.mesh}
+
+# Filter the data frame
+TwoSeas.dat2_filtered <- 
+  TwoSeas.dat2[TwoSeas.dat2$X >= min(TwoSeas.dat2$X) & 
+                 TwoSeas.dat2$X <= max(TwoSeas.dat2$X) & 
+                 TwoSeas.dat2$Y >= min(TwoSeas.dat2$Y) & 
+                 TwoSeas.dat2$Y <= max(TwoSeas.dat2$Y), ]
 
 # Cutoff values control the minimum distance between knots.
 ## It is generally better to start with a coarser mesh (larger cutoff)
 ## However there is a tradeoff on spatial predictability (more knots) and
 ## over fitting the time to process. If the day is irregularly distributed
 ## you can also try residual-based knot placement
-meshTwoSeas.dat2 <- make_mesh(TwoSeas.dat2, xy_cols = c("X", "Y"), cutoff = 25) 
+meshTwoSeas.dat2_filtered <- make_mesh(TwoSeas.dat2_filtered, xy_cols = c("X", "Y"), cutoff = 50) 
 
 # Check number of mesh nodes 
 ## If greater than >1,000–2,000 nodes, 
 ## you’re likely in trouble unless you have a lot of RAM.
-length(meshTwoSeas.dat2$mesh$loc[,1])
-# [1] 617
+length(meshTwoSeas.dat2_filtered$mesh$loc[,1])
+# [1] 270
+
+plot(meshTwoSeas.dat2_filtered)
+points(TwoSeas.dat2_filtered$X, TwoSeas.dat2_filtered$Y, col = "red", pch = 19, 
+       cex = 0.2) 
 
 # proj_scaling should match units of (since we are working in m, but density
 # is in km, divide by 1000)
-barrier2 <- add_barrier_mesh(meshTwoSeas.dat2, land.barrier, proj_scaling = 1000)
+barrier2 <- sdmTMBextra::add_barrier_mesh(meshTwoSeas.dat2_filtered, land.barrier, proj_scaling = 1000)
 
 ## If greater than >1,000–2,000 nodes, 
 ## you’re likely in trouble unless you have a lot of RAM.
 length(barrier2$mesh$loc[,1])
-# [1] 617
+# [1] 270
 
 # Example plot code from ?add_barrier_mesh
 mesh_df_water2 <- barrier2$mesh_sf[barrier2$normal_triangles, ]
@@ -218,8 +261,8 @@ ggplot() +
 
 Mesh.with.barrier2
 
-plot(barrier2)
-points(TwoSeas.dat2$X, TwoSeas.dat2$Y, col = "red", pch = 19, 
+plot(meshTwoSeas.dat2_filtered)
+points(TwoSeas.dat2_filtered$X, TwoSeas.dat2_filtered$Y, col = "red", pch = 19, 
        cex = 0.2) 
 
 ```

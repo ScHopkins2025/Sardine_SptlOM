@@ -12,7 +12,7 @@ output:
 
 # Run first if not already installed
 # remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
- 
+#  
 
 rm(list=ls())
 gc()
@@ -20,8 +20,8 @@ gc()
 load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion",
               "pROC", "here", "sdmTMB", "sdmTMBextra", "visreg",
               "ggforce", # enables plot_anisotropy
-              "spatstat",# Get summary table for nearest neighbour
-              ) 
+              "spatstat" # Get summary table for nearest neighbour) 
+              )
 
 install.lib <- load.lib[!load.lib %in% installed.packages()]
 
@@ -47,9 +47,16 @@ load(file = here(dir, "Data", "ExampleRun",
 
 ```
 
-# Creat Barrier Mesh
+# Creat Mesh
 
-```{r, construct.barrier.mesh}
+```{r, construct.mesh}
+
+# Filter the data frame
+TwoSeas.dat2_filtered <- 
+  TwoSeas.dat2[TwoSeas.dat2$X >= min(TwoSeas.dat2$X) & 
+                 TwoSeas.dat2$X <= max(TwoSeas.dat2$X) & 
+                 TwoSeas.dat2$Y >= min(TwoSeas.dat2$Y) & 
+                 TwoSeas.dat2$Y <= max(TwoSeas.dat2$Y), ]
 
 # Read full resolution - Continental land masses and ocean islands, except Antarctica.
 land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
@@ -60,13 +67,25 @@ plot(land.barrier)
 ## However there is a tradeoff on spatial predictability (more knots) and
 ## over fitting the time to process. If the day is irregularly distributed
 ## you can also try residual-based knot placement
-meshTwoSeas.dat2 <- make_mesh(TwoSeas.dat2, xy_cols = c("X", "Y"), cutoff = 25) 
+meshTwoSeas.dat2_filtered <- make_mesh(TwoSeas.dat2_filtered, xy_cols = c("X", "Y"), cutoff = 50) 
 
 # Check number of mesh nodes 
 ## If greater than >1,000–2,000 nodes, 
 ## you’re likely in trouble unless you have a lot of RAM.
-length(meshTwoSeas.dat2$mesh$loc[,1])
-# [1] 617
+length(meshTwoSeas.dat2_filtered$mesh$loc[,1])
+# [1] 266
+
+plot(meshTwoSeas.dat2_filtered)
+points(TwoSeas.dat2_filtered$X, TwoSeas.dat2_filtered$Y, col = "red", pch = 19, 
+       cex = 0.2)
+
+```
+
+
+# Creat Barrier Mesh
+
+
+```{r, construct.barrier.mesh}
 
 # proj_scaling should match units of (since we are working in m, but density
 # is in km, divide by 1000)
@@ -75,7 +94,7 @@ barrier2 <- add_barrier_mesh(meshTwoSeas.dat2, land.barrier, proj_scaling = 1000
 ## If greater than >1,000–2,000 nodes, 
 ## you’re likely in trouble unless you have a lot of RAM.
 length(barrier2$mesh$loc[,1])
-# [1] 617
+# [1] 266
 
 # Example plot code from ?add_barrier_mesh
 mesh_df_water2 <- barrier2$mesh_sf[barrier2$normal_triangles, ]
@@ -104,9 +123,9 @@ set.seed(1)
 ## Add age and length fixed effects with temporal and spatial autocorrelation
 ## Note that this is testing presence absence and then density predicted by age
 ## and length bin so we want the intercept
-fit1 <- sdmTMB(Dnsty_n_3 ~ as.factor(YearSeas),
-               data = TwoSeas.dat2, 
-               mesh = barrier2,
+fit1 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = TwoSeas.dat2_filtered, 
+               mesh = meshTwoSeas.dat2_filtered,
                # Fit model by year and month
                ## Note if time is specified, spatiotemporal correlation is tested
                ## by default
