@@ -12,7 +12,6 @@ output:
 
 # Run first if not already installed
 # remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE)
-#  
 
 rm(list=ls())
 gc()
@@ -47,54 +46,442 @@ load(file = here(dir, "Data", "ExampleRun",
 
 ```
 
-# Creat Mesh
+# Split data by Season
 
-```{r, construct.mesh}
+Note many attempts to fit one model over both seasons has failed so this is the next resort.
+
+## For Season 1:
+
+### Define spatial boundaries
+
+```{r, sptl.boundaries}
 
 # Filter the data frame
-TwoSeas.dat2_filtered <- 
-  TwoSeas.dat2[TwoSeas.dat2$X >= min(TwoSeas.dat2$X) & 
-                 TwoSeas.dat2$X <= max(TwoSeas.dat2$X) & 
-                 TwoSeas.dat2$Y >= min(TwoSeas.dat2$Y) & 
-                 TwoSeas.dat2$Y <= max(TwoSeas.dat2$Y), ]
+Season.1.dat <- TwoSeas.dat2 %>%
+  filter(Season == "S1") 
 
-# Read full resolution - Continental land masses and ocean islands, except Antarctica.
-land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
-plot(land.barrier)
+Season.1.dat <- Season.1.dat[Season.1.dat$X >= min(Season.1.dat$X) & 
+                Season.1.dat$X <= max(Season.1.dat$X) & 
+                Season.1.dat$Y >= min(Season.1.dat$Y) & 
+                Season.1.dat$Y <= max(Season.1.dat$Y), ]
+
+# Function to test for values ending in .0
+integerFunction <- function(x) {
+  x %% 1 == 0
+}
+
+vals <- integerFunction(est.missing.time2) 
+
+# Apply the function to filter values ending in .0
+est.missing.time.S1 <- est.missing.time2[vals]
+
+# Format as character to preserve '.0'
+formatted.S1 <- format(est.missing.time.S1, nsmall = 1)
+
+```
+
+### Create Mesh
+
+```{r, build.seas.1.mesh}
 
 # Cutoff values control the minimum distance between knots.
 ## It is generally better to start with a coarser mesh (larger cutoff)
 ## However there is a tradeoff on spatial predictability (more knots) and
 ## over fitting the time to process. If the day is irregularly distributed
 ## you can also try residual-based knot placement
-meshTwoSeas.dat2_filtered <- make_mesh(TwoSeas.dat2_filtered, xy_cols = c("X", "Y"), cutoff = 50) 
+meshSeason.1.dat <- make_mesh(Season.1.dat, 
+                              xy_cols = c("X", "Y"), cutoff = 50) 
 
 # Check number of mesh nodes 
 ## If greater than >1,000–2,000 nodes, 
 ## you’re likely in trouble unless you have a lot of RAM.
-length(meshTwoSeas.dat2_filtered$mesh$loc[,1])
-# [1] 266
+length(meshSeason.1.dat$mesh$loc[,1])
+# [1] 217
 
-plot(meshTwoSeas.dat2_filtered)
-points(TwoSeas.dat2_filtered$X, TwoSeas.dat2_filtered$Y, col = "red", pch = 19, 
+plot(meshSeason.1.dat)
+points(Season.1.dat$X, Season.1.dat$Y, col = "red", pch = 19, 
        cex = 0.2)
 
 ```
 
+### Estimate Season 1 Density
 
-# Creat Barrier Mesh
+#### Model 1: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1"
 
+```{r, S1density.by.yearseas.ar1}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit1 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.1.dat, 
+               mesh = meshSeason.1.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = as.numeric(formatted.S1),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = TRUE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit1)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit1)
+## M1:
+#### Spatiotemporal AR1 correlation (rho): 0.45
+#### Matérn anisotropic range (spatiotemporal): 114.4 to 349.1 at 129 deg.
+#### Spatiotemporal marginal AR1 SD: 2.65
+
+## M2:
+#### Dispersion parameter: 0.55
+#### Spatiotemporal AR1 correlation (rho): -0.98
+#### Matérn anisotropic range (spatiotemporal): 83.1 to 253.8 at 129 deg.
+#### Spatiotemporal marginal AR1 SD: 1.72
+#### ML criterion at convergence: -2787.776
+
+# Predict (gives a whole new df, unlike GAM)
+Season.1.dat.f1 <- predict(fit1, newdata = Season.1.dat, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Dnsty_k_3 ~ est, data = Season.1.dat.f1))$r.squared # 0.2906509
+
+# MAE
+mean(abs(Season.1.dat.f1$Dnsty_k_3 - Season.1.dat.f1$est)) # [1] 3.433809e-06
+
+mean(Season.1.dat$Dnsty_k_3)
+# [1] 3.056049e-06
+sd(Season.1.dat$Dnsty_k_3)
+# [1] 2.226429e-05
+
+fit1.tidy <- tidy(fit1)
+plot_anisotropy(fit1)
+
+```
+
+#### Model 2: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw"
+
+```{r, S1density.by.yearseas.rw}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit2 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.1.dat, 
+               mesh = meshSeason.1.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "rw",
+               spatial = "off", 
+               extra_time = as.numeric(formatted.S1),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = TRUE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit2)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit2)
+## M1:
+#### Matérn anisotropic range (spatiotemporal): 19.2 to 2342.4 at 126 deg.
+#### Spatiotemporal RW SD: 1.55
+
+## M2:
+#### Dispersion parameter: 0.55
+#### Matérn anisotropic range (spatiotemporal): 2.8 to 334.9 at 126 deg.
+#### Spatiotemporal RW SD: 1.19
+#### ML criterion at convergence: -2763.178
+
+# Predict (gives a whole new df, unlike GAM)
+Season.1.dat.f2 <- predict(fit2, newdata = Season.1.dat, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Dnsty_k_3 ~ est, data = Season.1.dat.f2))$r.squared # 0.1769267
+
+# MAE
+mean(abs(Season.1.dat.f2$Dnsty_k_3 - Season.1.dat.f2$est)) # [1] 3.86554e-06
+
+mean(Season.1.dat$Dnsty_k_3)
+# [1] 3.056049e-06
+sd(Season.1.dat$Dnsty_k_3)
+# [1] 2.226429e-05
+
+fit2.tidy <- tidy(fit2)
+plot_anisotropy(fit2)
+
+```
+
+#### Model 3: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1" w spatial = "on"
+
+```{r, S1density.by.yearseas.ar1.w.sptl}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit3 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.1.dat, 
+               mesh = meshSeason.1.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "on", 
+               extra_time = as.numeric(formatted.S1),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = TRUE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit3)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✖ `ln_tau_O` standard error may be large
+# ℹ `ln_tau_O` is an internal parameter affecting `sigma_O`
+# ℹ `sigma_O` is the spatial standard deviation
+# ℹ Try simplifying the model, adjusting the mesh, or adding priors
+# ✖ `sigma_O` is smaller than 0.01
+# ℹ Consider omitting this part of the model
+# ✔ Range parameters don't look unreasonably large
+
+```
+
+#### Model 4: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw" w spatial = "on"
+
+```{r, S1density.by.yearseas.ar1.w.sptl}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit4 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.1.dat, 
+               mesh = meshSeason.1.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "rw",
+               spatial = "on", 
+               extra_time = as.numeric(formatted.S1),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = TRUE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit4)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✖ `ln_tau_O` standard error may be large
+# ℹ `ln_tau_O` is an internal parameter affecting `sigma_O`
+# ℹ `sigma_O` is the spatial standard deviation
+# ℹ Try simplifying the model, adjusting the mesh, or adding priors
+# ✖ `sigma_O` is smaller than 0.01
+# ℹ Consider omitting this part of the model
+# ✔ Range parameters don't look unreasonably large
+
+```
+
+#### Model 5: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1" w/o sanisotropy
+
+```{r, S1density.by.yearseas.rw.no.anisotropy}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit5 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.1.dat, 
+               mesh = meshSeason.1.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = as.numeric(formatted.S1),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit5)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit5)
+# M1: 
+#### Spatiotemporal AR1 correlation (rho): 0.40
+#### Matérn range: 209.48
+#### Spatiotemporal marginal AR1 SD: 2.57
+# M2:
+#### Dispersion parameter: 0.56
+#### Spatiotemporal AR1 correlation (rho): -0.98
+#### Matérn range: 177.60
+#### Spatiotemporal marginal AR1 SD: 1.65
+#### ML criterion at convergence: -2786.577
+
+# Predict (gives a whole new df, unlike GAM)
+Season.1.dat.f5 <- predict(fit5, newdata = Season.1.dat, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Dnsty_k_3 ~ est, data = Season.1.dat.f5))$r.squared # 0.2884776
+
+# MAE
+mean(abs(Season.1.dat.f5$Dnsty_k_3 - Season.1.dat.f5$est)) # [1] 3.457461e-06
+
+mean(Season.1.dat$Dnsty_k_3)
+# [1] 3.056049e-06
+sd(Season.1.dat$Dnsty_k_3)
+# [1] 2.226429e-05
+
+```
+
+#### Model 6: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw" w/o anisotropy
+
+```{r, S1density.by.yearseas.rw.no.anisotropy}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit6 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.1.dat, 
+               mesh = meshSeason.1.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "rw",
+               spatial = "off", 
+               extra_time = as.numeric(formatted.S1),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit6)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit6)
+# M1: 
+#### Matérn range: 380.68
+#### Spatiotemporal RW SD: 0.91
+# M2:
+#### Dispersion parameter: 0.49
+#### Matérn range: 135.96
+#### Spatiotemporal RW SD: 0.44
+#### ML criterion at convergence: -2758.525
+
+# Predict (gives a whole new df, unlike GAM)
+Season.1.dat.f6 <- predict(fit6, newdata = Season.1.dat, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Dnsty_k_3 ~ est, data = Season.1.dat.f6))$r.squared # 0.1834251
+
+# MAE
+mean(abs(Season.1.dat.f6$Dnsty_k_3 - Season.1.dat.f6$est)) # [1] 3.857421e-06
+
+mean(Season.1.dat$Dnsty_k_3)
+# [1] 3.056049e-06
+sd(Season.1.dat$Dnsty_k_3)
+# [1] 2.226429e-05
+
+```
+
+#### Creat Barrier Mesh
 
 ```{r, construct.barrier.mesh}
 
+# Read full resolution - Continental land masses and ocean islands, except Antarctica.
+land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
+plot(land.barrier)
+
 # proj_scaling should match units of (since we are working in m, but density
 # is in km, divide by 1000)
-barrier2 <- add_barrier_mesh(meshTwoSeas.dat2, land.barrier, proj_scaling = 1000)
+barrier2 <- add_barrier_mesh(meshSeason.1.dat, land.barrier, proj_scaling = 1000)
 
 ## If greater than >1,000–2,000 nodes, 
 ## you’re likely in trouble unless you have a lot of RAM.
 length(barrier2$mesh$loc[,1])
-# [1] 266
+# [1] 217
 
 # Example plot code from ?add_barrier_mesh
 mesh_df_water2 <- barrier2$mesh_sf[barrier2$normal_triangles, ]
@@ -109,23 +496,23 @@ ggplot() +
 Mesh.with.barrier2
 
 plot(barrier2)
-points(TwoSeas.dat2$X, TwoSeas.dat2$Y, col = "red", pch = 19, 
+points(Season.1.dat$X, Season.1.dat$Y, col = "red", pch = 19, 
        cex = 0.2) 
 
 ```
 
-# Model 1: Dnsty_n_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1"
+#### Model 7: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1" w "barrier mesh"
 
-```{r, density.by.yearseas.ar1}
+```{r, S1density.by.yearseas.ar1.barrier.mesh}
 
 set.seed(1) 
-
+ 
 ## Add age and length fixed effects with temporal and spatial autocorrelation
 ## Note that this is testing presence absence and then density predicted by age
 ## and length bin so we want the intercept
-fit1 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
-               data = TwoSeas.dat2_filtered, 
-               mesh = meshTwoSeas.dat2_filtered,
+fit7 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.1.dat, 
+               mesh = barrier2,
                # Fit model by year and month
                ## Note if time is specified, spatiotemporal correlation is tested
                ## by default
@@ -134,7 +521,7 @@ fit1 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
                # Otherwise, use default "iid" (independent by time step)
                spatiotemporal = "ar1",
                spatial = "off", 
-               extra_time = est.missing.time2,
+               extra_time = as.numeric(formatted.S1),
                # Fit hurdle model (first link is 0 or 1, second link is > 0)
                family = delta_gamma(link1 = "logit", link2 = "log"),
                anisotropy = FALSE,
@@ -142,7 +529,7 @@ fit1 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
                silent = FALSE)
 
 # Check model skill, fit, and convergence
-sanity(fit1)
+sanity(fit7)
 # ✔ Non-linear minimizer suggests successful convergence
 # ✔ Hessian matrix is positive definite
 # ✔ No extreme or very small eigenvalues detected
@@ -150,43 +537,792 @@ sanity(fit1)
 # ✔ No fixed-effect standard errors are NA
 # ✔ No standard errors look unreasonably large
 # ✔ No sigma parameters are < 0.01
-##------------------------------------------------------------------------------
-## ✖ `sigma_E` is larger than 100
-## ℹ Consider simplifying the model or adding priors
-##
-#### Large values of sigma_E indicate that there is a high level of spatial 
-#### variation that your model has not explained. 
-##------------------------------------------------------------------------------
+# ✔ No sigma parameters are > 100
 # ✔ Range parameters don't look unreasonably large
 
-summary(fit1)
-## M1:
-#### Spatiotemporal AR1 correlation (rho): 0.08
-#### Matérn range: 82.73
-#### Spatial SD: 81.67
-#### Spatiotemporal marginal AR1 SD:  625.07
-
-## M2:
-#### Dispersion Parameter: 0.45 (Good, typical range: 0.5-1.5)
-#### Spatiotemporal AR1 Correlation (rho): 0.44 (Moderate to strong, 
-## typical range: 0.4 - 0.8)
-#### Matérn Range: 119.278 (Good, typical range: 50-200 depending on scale)
-#### Spatial SD: 10.11
-#### Spatiotemporal Marginal AR1 SD: 47.38 (Good, typical range: 10-50)
-#### ML Criterion: 4289.604 (Best used for model comparison, not absolute assessment)
+summary(fit7)
+# M1: 
+#### Spatiotemporal AR1 correlation (rho): 0.39
+#### Matérn range: 212.22
+#### Spatiotemporal marginal AR1 SD: 83.27
+# M2:
+#### Dispersion parameter: 0.56
+#### Spatiotemporal AR1 correlation (rho): -0.98
+#### Matérn range: 188.86
+#### Spatiotemporal marginal AR1 SD: 47.37
+#### ML criterion at convergence: -2784.269
 
 # Predict (gives a whole new df, unlike GAM)
-p1TwoSeas.dat2 <- predict(fit1, newdata = p1TwoSeas.dat2, type = "response")
+Season.1.dat.f7 <- predict(fit7, newdata = Season.1.dat, type = "response")
 
 # Overall R2 for test and train 
-summary(lm(Dnsty_n_3 ~ est, data = p1TwoSeas.dat2))$r.squared # 0.140585
+summary(lm(Dnsty_k_3 ~ est, data = Season.1.dat.f7))$r.squared # 0.2924607
 
 # MAE
-mean(abs(p1TwoSeas.dat2$Dnsty_n_3 - p1TwoSeas.dat2$est)) # 314.6031
+mean(abs(Season.1.dat.f7$Dnsty_k_3 - Season.1.dat.f7$est)) # [1] 3.42653e-06
 
-mean(TwoSeas.dat2$Dnsty_n_3)
-# [1] 231.8522
-sd(TwoSeas.dat2$Dnsty_n_3)
-# [1] 11672.67
+mean(Season.1.dat$Dnsty_k_3)
+# [1] 3.056049e-06
+sd(Season.1.dat$Dnsty_k_3)
+# [1] 2.226429e-05
 
 ```
+
+#### Model 8: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw" w "barrier mesh"
+
+```{r, S1density.by.yearseas.ar1.barrier.mesh}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit8 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.1.dat, 
+               mesh = barrier2,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "rw",
+               spatial = "off", 
+               extra_time = as.numeric(formatted.S1),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit8)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit8)
+# M1: 
+#### Matérn range: 357.09
+#### Spatiotemporal RW SD: 49.29
+# M2:
+#### Dispersion parameter: 0.49
+#### Matérn range: 160.66
+#### Spatiotemporal RW SD: 10.65
+#### ML criterion at convergence: -2755.843
+
+# Predict (gives a whole new df, unlike GAM)
+Season.1.dat.f8 <- predict(fit8, newdata = Season.1.dat, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Dnsty_k_3 ~ est, data = Season.1.dat.f8))$r.squared # 0.182534
+
+# MAE
+mean(abs(Season.1.dat.f8$Dnsty_k_3 - Season.1.dat.f8$est)) # [1] 3.856762e-06
+
+mean(Season.1.dat$Dnsty_k_3)
+# [1] 3.056049e-06
+sd(Season.1.dat$Dnsty_k_3)
+# [1] 2.226429e-05
+
+```
+
+#### Select Best Season 1 Model for Total Biomass
+
+```{r, best.model.season.1.global.trend}
+
+BIC(fit1,fit2,fit5,fit6,fit7,fit8)
+
+summary(fit2)
+summary(fit8)
+
+fit2.tidy
+fit8.tidy <- tidy(fit8)
+
+```
+
+## For Season 2:
+
+### Define spatial boundaries
+
+```{r, sptl.boundaries2}
+
+# Filter the data frame
+Season.2.dat <- TwoSeas.dat2 %>%
+  filter(Season == "S2") 
+
+Season.2.dat <- Season.2.dat[Season.2.dat$X >= min(Season.2.dat$X) & 
+                Season.2.dat$X <= max(Season.2.dat$X) & 
+                Season.2.dat$Y >= min(Season.2.dat$Y) & 
+                Season.2.dat$Y <= max(Season.2.dat$Y), ]
+
+# Function to test for values ending in .1
+integerFunction <- function(x) {
+  abs(x %% 1 - 0.1) < 1e-8
+}
+
+vals <- integerFunction(est.missing.time2) 
+
+# Apply the function to filter values ending in .1
+est.missing.time.S2 <- est.missing.time2[vals]
+est.missing.time.S2
+
+```
+
+### Create Mesh
+
+```{r, build.seas.2.mesh}
+
+# Cutoff values control the minimum distance between knots.
+## It is generally better to start with a coarser mesh (larger cutoff)
+## However there is a tradeoff on spatial predictability (more knots) and
+## over fitting the time to process. If the day is irregularly distributed
+## you can also try residual-based knot placement
+meshSeason.2.dat <- make_mesh(Season.2.dat, 
+                              xy_cols = c("X", "Y"), cutoff = 50) 
+
+# Check number of mesh nodes 
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(meshSeason.2.dat$mesh$loc[,1])
+# [1] 219
+
+plot(meshSeason.2.dat)
+points(Season.2.dat$X, Season.2.dat$Y, col = "red", pch = 19, 
+       cex = 0.2)
+
+```
+
+### Estimate Season 2 Density
+
+#### Model 9: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1"
+
+```{r, S2density.by.yearseas.ar1}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit9 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.2.dat, 
+               mesh = meshSeason.2.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = as.numeric(est.missing.time.S2),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = TRUE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit9)
+
+```
+
+#### Model 10: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw"
+
+```{r, S2density.by.yearseas.rw}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit10 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.2.dat, 
+               mesh = meshSeason.2.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "rw",
+               spatial = "off", 
+               extra_time = as.numeric(est.missing.time.S2),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = TRUE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit10)
+
+```
+
+#### Model 11: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1" w spatial = "on"
+
+```{r, S2density.by.yearseas.ar1.w.sptl}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit11 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.2.dat, 
+               mesh = meshSeason.2.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "on", 
+               extra_time = as.numeric(est.missing.time.S2),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = TRUE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit11)
+
+```
+
+#### Model 12: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw" w spatial = "on"
+
+```{r, S2density.by.yearseas.ar1.w.sptl}
+
+set.seed(12) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit12 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.2.dat, 
+               mesh = meshSeason.2.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "rw",
+               spatial = "on", 
+               extra_time = as.numeric(est.missing.time.S2),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = TRUE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit12)
+
+```
+
+#### Model 13: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1" w/o sanisotropy
+
+```{r, S2density.by.yearseas.rw.no.anisotropy}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit13 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+                data = Season.2.dat, 
+                mesh = meshSeason.2.dat,
+                # Fit model by year and month
+                ## Note if time is specified, spatiotemporal correlation is tested
+                ## by default
+                time = "YearSeas.nm",
+                # Use "ar1" or "rw" if you expect temporal autocorrelation
+                # Otherwise, use default "iid" (independent by time step)
+                spatiotemporal = "ar1",
+                spatial = "off", 
+                extra_time = as.numeric(est.missing.time.S2),
+                # Fit hurdle model (first link is 0 or 1, second link is > 0)
+                family = delta_gamma(link1 = "logit", link2 = "log"),
+                anisotropy = FALSE,
+                # Show progress
+                silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit13)
+
+```
+
+#### Model 14: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw" w/o anisotropy
+
+```{r, S2density.by.yearseas.rw.no.anisotropy}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit14 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.2.dat, 
+               mesh = meshSeason.2.dat,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "rw",
+               spatial = "off", 
+               extra_time = as.numeric(est.missing.time.S2),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit14)
+
+```
+
+#### Creat Barrier Mesh
+
+```{r, construct.barrier.mesh2}
+
+# proj_scaling should match units of (since we are working in m, but density
+# is in km, divide by 1000)
+barrier3 <- add_barrier_mesh(meshSeason.2.dat, land.barrier, proj_scaling = 1000)
+
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(barrier3$mesh$loc[,1])
+# [1] 219
+
+# Example plot code from ?add_barrier_mesh
+mesh_df_water3 <- barrier3$mesh_sf[barrier3$normal_triangles, ]
+mesh_df_land3 <- barrier3$mesh_sf[barrier3$barrier_triangles, ]
+
+Mesh.with.barrier3 <-
+ggplot() +
+  geom_sf(data = land.barrier) +
+  geom_sf(data = mesh_df_water3, size = 1, colour = "blue") +
+  geom_sf(data = mesh_df_land3, size = 1, colour = "green")
+
+Mesh.with.barrier3
+
+plot(barrier3)
+points(Season.2.dat$X, Season.2.dat$Y, col = "red", pch = 19, 
+       cex = 0.2) 
+
+```
+
+#### Model 15: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1" w "barrier mesh"
+
+```{r, S2density.by.yearseas.ar1.barrier.mesh}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit15 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.2.dat, 
+               mesh = barrier3,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "ar1",
+               spatial = "off", 
+               extra_time = as.numeric(est.missing.time.S2),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit15)
+
+```
+
+#### Model 16: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw" w "barrier mesh"
+
+```{r, S2density.by.yearseas.ar1.barrier.mesh}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit16 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+               data = Season.2.dat, 
+               mesh = barrier3,
+               # Fit model by year and month
+               ## Note if time is specified, spatiotemporal correlation is tested
+               ## by default
+               time = "YearSeas.nm",
+               # Use "ar1" or "rw" if you expect temporal autocorrelation
+               # Otherwise, use default "iid" (independent by time step)
+               spatiotemporal = "rw",
+               spatial = "off", 
+               extra_time = as.numeric(est.missing.time.S2),
+               # Fit hurdle model (first link is 0 or 1, second link is > 0)
+               family = delta_gamma(link1 = "logit", link2 = "log"),
+               anisotropy = FALSE,
+               # Show progress
+               silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit16)
+
+```
+
+### Attempt Season II w/o late sampling
+
+See if removing  October and November sampling helps
+
+```{r, split.season.2}
+
+Season.2.dat.cut <- Season.2.dat %>%
+  filter(Month < 10)
+
+Season.2.dat.cut <- Season.2.dat.cut[Season.2.dat.cut$X >= min(Season.2.dat.cut$X) & 
+                    Season.2.dat.cut$X <= max(Season.2.dat.cut$X) & 
+                    Season.2.dat.cut$Y >= min(Season.2.dat.cut$Y) & 
+                    Season.2.dat.cut$Y <= max(Season.2.dat.cut$Y), ]
+
+unique(Season.2.dat.cut$Year)
+
+```
+
+#### Find missing time steps
+
+```{r, missing.seasons}
+
+# Generate complete sequence
+# Define the range of years
+years <- 2003:2024
+
+# Create the sequence of year-season combinations
+year_season_sequence <- data.frame(
+  YearSeas.nm = unlist(lapply(years, function(year) {
+  # For each year, create two entries: season 1 (0.0) and season 2 (0.1)
+  ## year + 0/10 gives 2003.0,while year + 1/10 gives 2003.1
+  c(year + 1 / 10)  
+}))
+)
+
+# Print the resulting sequence
+year_season_sequence
+
+missing_seas2.cut <- year_season_sequence %>%
+  anti_join(Season.2.dat.cut, by = "YearSeas.nm") %>%
+  select(YearSeas.nm)
+
+missing_seas2.cut
+
+```
+
+#### Create Mesh
+
+```{r, build.seas.2.cut.mesh}
+
+# Cutoff values control the minimum distance between knots.
+## It is generally better to start with a coarser mesh (larger cutoff)
+## However there is a tradeoff on spatial predictability (more knots) and
+## over fitting the time to process. If the day is irregularly distributed
+## you can also try residual-based knot placement
+meshSeason.2.dat.cut <- make_mesh(Season.2.dat.cut, 
+                              xy_cols = c("X", "Y"), cutoff = 50) 
+
+# Check number of mesh nodes 
+## If greater than >1,000–2,000 nodes, 
+## you’re likely in trouble unless you have a lot of RAM.
+length(meshSeason.2.dat.cut$mesh$loc[,1])
+# [1] 219
+
+plot(meshSeason.2.dat.cut)
+points(Season.2.dat.cut$X, Season.2.dat.cut$Y, col = "red", pch = 19, 
+       cex = 0.2)
+
+```
+
+#### Estimate Season 2 Cut Density
+
+##### Model 17: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1"
+
+```{r, S2.cut.density.by.yearseas.ar1}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit17 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+                data = Season.2.dat.cut, 
+                mesh = meshSeason.2.dat.cut,
+                # Fit model by year and month
+                ## Note if time is specified, spatiotemporal correlation is tested
+                ## by default
+                time = "YearSeas.nm",
+                # Use "ar1" or "rw" if you expect temporal autocorrelation
+                # Otherwise, use default "iid" (independent by time step)
+                spatiotemporal = "ar1",
+                spatial = "off", 
+                extra_time = missing_seas2.cut$YearSeas.nm,
+                # Fit hurdle model (first link is 0 or 1, second link is > 0)
+                family = delta_gamma(link1 = "logit", link2 = "log"),
+                anisotropy = TRUE,
+                # Show progress
+                silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit17)
+# ✔ Non-linear minimizer suggests successful convergence
+
+## ✖ Non-positive-definite Hessian matrix: model may not have converged
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+
+## Warning in sqrt(diag(object$cov.fixed)) : NaNs produced
+## Warning in sqrt(as.numeric(object$diag.cov.random)) : NaNs produced
+
+# ✔ No fixed-effect standard errors are NA
+
+## Warning in sqrt(diag(object$cov.fixed)) : NaNs produced
+## Warning in sqrt(as.numeric(object$diag.cov.random)) : NaNs produced
+
+## ✖ `ln_tau_E` standard error may be large
+## ℹ `ln_tau_E` is an internal parameter affecting `sigma_E`
+## ℹ `sigma_E` is the spatiotemporal standard deviation
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+
+## ✖ `ln_kappa` standard error may be large
+## ℹ `ln_kappa` is an internal parameter affecting `range`
+## ℹ `range` is the distance at which data are effectively independent
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+
+## Warning in sqrt(diag(object$cov.fixed)) : NaNs produced
+## Warning in sqrt(as.numeric(object$diag.cov.random)) : NaNs produced
+
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+# ✔ Range parameters don't look unreasonably large
+
+```
+
+##### Model 18: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw"
+
+```{r, S2.cut.density.by.yearseas.rw}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit18 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+                data = Season.2.dat.cut, 
+                mesh = meshSeason.2.dat.cut,
+                # Fit model by year and month
+                ## Note if time is specified, spatiotemporal correlation is tested
+                ## by default
+                time = "YearSeas.nm",
+                # Use "ar1" or "rw" if you expect temporal autocorrelation
+                # Otherwise, use default "iid" (independent by time step)
+                spatiotemporal = "rw",
+                spatial = "off", 
+                extra_time = missing_seas2.cut$YearSeas.nm,
+                # Fit hurdle model (first link is 0 or 1, second link is > 0)
+                family = delta_gamma(link1 = "logit", link2 = "log"),
+                anisotropy = TRUE,
+                # Show progress
+                silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit18)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit18)
+
+# M1:
+## Matérn anisotropic range (spatiotemporal): 109.4 to 1007.7 at 75 deg.
+## Spatiotemporal RW SD: 0.77
+# M2:
+## Dispersion parameter: 0.43
+## Matérn anisotropic range (spatiotemporal): 48.8 to 449.3 at 75 deg.
+## Spatiotemporal RW SD: 1.04
+## ML criterion at convergence: -3949.116
+
+# Predict (gives a whole new df, unlike GAM)
+Season.2.dat.cut.f18 <- predict(fit18, newdata = Season.2.dat.cut, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Dnsty_k_3 ~ est, data = Season.2.dat.cut.f18))$r.squared # 0.05003276
+
+# MAE
+mean(abs(Season.2.dat.cut.f18$Dnsty_k_3 - Season.2.dat.cut.f18$est)) # [1] 6.070377e-06
+
+mean(Season.2.dat.cut$Dnsty_k_3)
+# [1] 4.26139e-06
+sd(Season.2.dat.cut$Dnsty_k_3)
+# [1] 2.547447e-05
+
+plot_anisotropy(fit18)
+
+```
+##### Model 19: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "ar1" w spatial = "on"
+
+```{r, S2.cut.density.by.yearseas.ar1.w.sptl}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit19 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+                data = Season.2.dat.cut, 
+                mesh = meshSeason.2.dat.cut,
+                # Fit model by year and month
+                ## Note if time is specified, spatiotemporal correlation is tested
+                ## by default
+                time = "YearSeas.nm",
+                # Use "ar1" or "rw" if you expect temporal autocorrelation
+                # Otherwise, use default "iid" (independent by time step)
+                spatiotemporal = "ar1",
+                spatial = "on", 
+                extra_time = missing_seas2.cut$YearSeas.nm,
+                # Fit hurdle model (first link is 0 or 1, second link is > 0)
+                family = delta_gamma(link1 = "logit", link2 = "log"),
+                anisotropy = TRUE,
+                # Show progress
+                silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit19)
+# ✔ Non-linear minimizer suggests successful convergence
+
+## ✖ Non-positive-definite Hessian matrix: model may not have converged
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+
+## ✖ `ln_tau_O` standard error may be large
+## ℹ `ln_tau_O` is an internal parameter affecting `sigma_O`
+## ℹ `sigma_O` is the spatial standard deviation
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+
+## ✖ `ln_tau_E` standard error may be large
+## ℹ `ln_tau_E` is an internal parameter affecting `sigma_E`
+## ℹ `sigma_E` is the spatiotemporal standard deviation
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+
+## ✖ `ln_kappa` standard error may be large
+## ℹ `ln_kappa` is an internal parameter affecting `range`
+## ℹ `range` is the distance at which data are effectively independent
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+
+## ✖ `ar1_phi` standard error may be large
+## ℹ Try simplifying the model, adjusting the mesh, or adding priors
+
+## ✖ `sigma_O` is smaller than 0.01
+## ℹ Consider omitting this part of the model
+
+## ✖ `sigma_E` is smaller than 0.01
+## ℹ Consider omitting this part of the model
+
+# ✔ Range parameters don't look unreasonably large
+
+```
+
+##### Model 20: Dnsty_k_3 ~ as.factor("YearSeas") w spatiotemporal = "rw" w spatial = "on"
+
+```{r, S2.cut.density.by.yearseas.rw.w.sptl}
+
+set.seed(1) 
+ 
+## Add age and length fixed effects with temporal and spatial autocorrelation
+## Note that this is testing presence absence and then density predicted by age
+## and length bin so we want the intercept
+fit20 <- sdmTMB(Dnsty_k_3 ~ 0 + as.factor(YearSeas),
+                data = Season.2.dat.cut, 
+                mesh = meshSeason.2.dat.cut,
+                # Fit model by year and month
+                ## Note if time is specified, spatiotemporal correlation is tested
+                ## by default
+                time = "YearSeas.nm",
+                # Use "ar1" or "rw" if you expect temporal autocorrelation
+                # Otherwise, use default "iid" (independent by time step)
+                spatiotemporal = "rw",
+                spatial = "on", 
+                extra_time = missing_seas2.cut$YearSeas.nm,
+                # Fit hurdle model (first link is 0 or 1, second link is > 0)
+                family = delta_gamma(link1 = "logit", link2 = "log"),
+                anisotropy = TRUE,
+                # Show progress
+                silent = FALSE)
+
+# Check model skill, fit, and convergence
+sanity(fit20)
+# ✔ Non-linear minimizer suggests successful convergence
+# ✔ Hessian matrix is positive definite
+# ✔ No extreme or very small eigenvalues detected
+# ✔ No gradients with respect to fixed effects are >= 0.001
+# ✔ No fixed-effect standard errors are NA
+# ✔ No standard errors look unreasonably large
+# ✔ No sigma parameters are < 0.01
+# ✔ No sigma parameters are > 100
+# ✔ Range parameters don't look unreasonably large
+
+summary(fit20)
+
+# M1:
+## Matérn anisotropic range (spatiotemporal): 109.4 to 1007.7 at 75 deg.
+## Spatiotemporal RW SD: 0.77
+# M2:
+## Dispersion parameter: 0.43
+## Matérn anisotropic range (spatiotemporal): 48.8 to 449.3 at 75 deg.
+## Spatiotemporal RW SD: 1.04
+## ML criterion at convergence: -3949.116
+
+# Predict (gives a whole new df, unlike GAM)
+Season.1.dat.f <- predict(fit8, newdata = Season.1.dat, type = "response")
+
+# Overall R2 for test and train 
+summary(lm(Dnsty_k_3 ~ est, data = Season.1.dat.f8))$r.squared # 0.182534
+
+# MAE
+mean(abs(Season.1.dat.f8$Dnsty_k_3 - Season.1.dat.f8$est)) # [1] 3.856762e-06
+
+mean(Season.1.dat$Dnsty_k_3)
+# [1] 3.056049e-06
+sd(Season.1.dat$Dnsty_k_3)
+# [1] 2.226429e-05
+
+plot_anisotropy(fit19)
+
+```
+
+
