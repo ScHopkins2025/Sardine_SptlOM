@@ -1,0 +1,291 @@
+---
+title: "ATM Survey Sardine Transect with Sweep Area Prep"
+author: "Stephanie Hopkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    
+---
+
+```{r setup, include=FALSE}
+
+# Install rnaturalearthhires if not installed already
+# devtools::install_github("ropensci/rnaturalearthhires")
+
+rm(list=ls())
+gc()
+
+load.lib <- c("tidyverse", "data.table", "cowplot", "sf", "rcompanion", "rnaturalearth", "rnaturalearthhires", "here")
+
+install.lib <- load.lib[!load.lib %in% installed.packages()]
+
+for(lib in install.lib) install.packages(lib,dependencies=TRUE)
+sapply(load.lib,require,character=TRUE)
+
+# Turn off s2 and use
+# geos since you are computing
+# distance and area
+sf_use_s2(FALSE)
+
+dir <- here(getwd())
+
+survey.path <- "/Survey.Data/"
+
+Figure.path <- "Figures/"
+
+source(paste0(dir,"/functions.R"))
+
+```
+
+# Read transect data
+
+Note here we do not group hauls or investigate age or length bin (len_bin), so we can just work directly with the total weight argument. It is necessary however to remove the geometry feature aspects and apply the transect function to the data. This way we do not consider any spatial buffer extent.
+
+```{r, read.dat}
+
+no.clust.dat <- read_sf(
+  file.path(paste(dir,
+                  "/Data/Shapefiles/area.transects.pre-step.shp", 
+                         sep = ""))) %>%
+  st_drop_geometry()
+
+# Rename columns to match function 
+no.clust.dat <- no.clust.dat %>%
+  mutate(start_latitude = init_lt,
+         start_longitude = init_ln,
+         stop_latitude = end_lat,
+         stop_longitude = end_lon, 
+         FID = row_number(.)) %>%
+  select(-c(init_lt, init_lt, end_lat, end_lon))
+
+# Since the data falls within two UTM zones and there is not an ideal projection to use, apply a custom equal area albers projection
+aea_custom <- "+proj=aea +lat_1=30 +lat_2=50 +lat_0=40 +lon_0=-124.5 +datum=WGS84 +units=m +no_defs"
+
+# Note data will be in wgs84
+no.clust.sf <- make_transect_sf(no.clust.dat) %>%
+  st_transform(., crs = aea_custom)
+
+```
+
+# Clean data
+
+
+```{r, clean.dat}
+
+no.clust.sf.cln <- no.clust.sf %>%
+  select(-c(weight, spcmn_., lngth_c, age, len_bin, WGHT_bn, NBRE_bn, WghtLnB,
+            latCntr, lonCntr, clstGRP, FID))
+  
+# Sum over individuals counted
+no.clust.sf.cln <- no.clust.sf.cln %>%
+  group_by(cruise, ship, haul, collctn, sciname, dattmPC, Total_W, Year, Month,
+           tim_stp, keys, date, sunrsPC, sunstPC, start_latitude, start_longitude,
+           stop_latitude, stop_longitude, geometry) %>%
+  summarise(NBRE_sm = sum(NBRE_sm))
+
+dim(no.clust.sf.cln)
+# [1] 2672  20
+
+dim(distinct(no.clust.sf.cln))
+# [1] 2672  20
+
+```
+
+# Calculate distance between start and stop of haul
+
+```{r, start.stop.dist}
+
+no.clust.sf.cln2 <- no.clust.sf.cln %>%
+# Define coordinate pairs
+  group_by(keys) %>%
+  mutate(
+    start.coords = st_sfc(
+      st_point(c(start_longitude, start_latitude)), 
+      crs = 4326) %>%
+      # Transform to custom CRS
+      st_transform(crs = aea_custom),  
+    end.coords = st_sfc(
+      st_point(c(stop_longitude, stop_latitude)),
+      crs = 4326) %>%
+       # Transform to custom CRS
+      st_transform(crs = aea_custom)  
+  ) %>%
+  ungroup()  
+
+no.clust.sf.cln2 <- no.clust.sf.cln2 %>%
+  group_by(keys) %>%
+  # Calculate distance travelled
+  mutate(dist.trvl = st_distance(start.coords, end.coords)) %>%
+  ungroup() 
+
+head(no.clust.sf.cln2$dist.trvl)
+
+```
+
+# Check for entries where start and stop are the same
+
+```{r,start.stop.equal}
+
+no.clust.sf.cln3 <- no.clust.sf.cln2 %>% 
+  mutate(dist.trvl.m = as.numeric(dist.trvl)) %>%
+  # Remove April 2007
+  filter(dist.trvl.m != 0)  %>%
+  select(-dist.trvl)
+
+# Check if there is a consistent haul distance -1 year
+test.2006 <- no.clust.sf.cln3 %>%
+  filter(Year == 2006 & 
+           substr(cruise, nchar(cruise)-1, nchar(cruise)) == "04")
+range(test.2006$dist.trvl.m)
+# [1] 1904.875 4330.351
+
+# Check if there is a consistent haul distance +1 year
+test.2008 <- no.clust.sf.cln3 %>%
+  filter(Year == 2008 & 
+           substr(cruise, nchar(cruise)-1, nchar(cruise)) == "04")
+range(test.2008$dist.trvl.m)
+# [1] 2323.137 8645.318
+
+```
+
+# Calculate sweep area
+
+## Check ships present to help with literature search
+
+```{r, ships.present}
+
+# Find unique ships
+unique(no.clust.sf.cln3$ship)
+# [1] "FR" "JD" "OD" "LB" "MF" "SH" "OS" "RL"
+
+# OD = Oscar Dyson
+# JD = David Starr Jordan
+# RL = Ruben Lasker
+# SH = Bell M. Shimada
+# FR = Frosti 
+# MF = Miller Freeman
+# OS = Ocean Star
+# LB = contracted commercial vessel
+
+```
+
+## For 2003-2005
+
+```{r, sweep.area.2004-2005}
+
+no.clust.sf.2003.2005 <- no.clust.sf.cln3 %>%
+  filter(Year %in% c(2003:2005)) %>%
+  # Nordic264 rope, 30 min, 4 knots ~360m2 (20m * 18m)
+  mutate(area.op.m2 = 20*18) %>%
+  mutate(sweep.m3 = area.op.m2*dist.trvl.m) %>%
+  distinct() %>%
+  mutate(Density.kg.m3 = Total_W/sweep.m3,
+         Density.g.m3 = Density.kg.m3*1000,
+         Density.n.m3 = NBRE_sm/sweep.m3) %>%
+  distinct()
+
+# View(no.clust.sf.2003.2005)
+
+write_sf(no.clust.sf.2003.2005, 
+         file.path(paste(dir, "/Data/Shapefiles/no.clust.sf.2003.2005.shp", 
+                         sep = "")),
+         overwrite = TRUE)
+
+```
+
+## For 2006-2010
+
+```{r, sweep.area.2006-2010}
+
+no.clust.sf.2006.2010 <- no.clust.sf.cln3 %>%
+  filter(Year %in% c(2006:2010)) %>%
+  # Nordic264 rope, 30 min, 4 knots ~360m2 (20m * 18m)
+  mutate(area.op.m2 = 24*30) %>%
+  mutate(sweep.m3 = area.op.m2*dist.trvl.m) %>%
+  distinct() %>%
+  mutate(Density.kg.m3 = Total_W/sweep.m3,
+         Density.g.m3 = Density.kg.m3*1000,
+         Density.n.m3 = NBRE_sm/sweep.m3) %>%
+  distinct()
+
+# View(no.clust.sf.2006.2010)
+
+write_sf(no.clust.sf.2006.2010, 
+         file.path(paste(dir, "/Data/Shapefiles/no.clust.sf.2006.2010.shp", 
+                         sep = "")),
+         overwrite = TRUE)
+
+```
+
+## For 2011-2014
+
+```{r, sweep.area.2011-2014}
+
+no.clust.sf.2011.2014 <- no.clust.sf.cln3 %>%
+  filter(Year %in% c(2011:2014)) %>%
+  # Nordic264 rope, 30min, 4 knots ~600m2 (not specified)
+  mutate(area.op.m2 = 600) %>%
+  mutate(sweep.m3 = area.op.m2*dist.trvl.m) %>%
+  distinct() %>%
+  mutate(Density.kg.m3 = Total_W/sweep.m3,
+         Density.g.m3 = Density.kg.m3*1000,
+         Density.n.m3 = NBRE_sm/sweep.m3) %>%
+  distinct()
+
+# View(no.clust.sf.2011.2014)
+
+write_sf(no.clust.sf.2011.2014, 
+         file.path(paste(dir, "/Data/Shapefiles/no.clust.sf.2011.2014.shp", 
+                         sep = "")),
+         overwrite = TRUE)
+
+```
+
+## For 2015-2020
+
+```{r, sweep.area.2015-2020}
+
+no.clust.sf.2015.2020 <- no.clust.sf.cln3 %>%
+  filter(Year %in% c(2015:2020)) %>%
+  # Nordic264 rope, 30-45min, 3.5-5 knots ~300m2 (15m * 20m) 
+  mutate(area.op.m2 = 15*20) %>%
+  mutate(sweep.m3 = area.op.m2*dist.trvl.m) %>%
+  distinct() %>%
+  mutate(Density.kg.m3 = Total_W/sweep.m3,
+         Density.g.m3 = Density.kg.m3*1000,
+         Density.n.m3 = NBRE_sm/sweep.m3) %>%
+  distinct()
+
+# View(no.clust.sf.2015.2020)
+
+write_sf(no.clust.sf.2015.2020, 
+         file.path(paste(dir, "/Data/Shapefiles/no.clust.sf.2015.2020.shp", 
+                         sep = "")),
+         overwrite = TRUE)
+
+```
+
+## For 2021-2024
+
+```{r, sweep.area.2021-2024}
+
+no.clust.sf.2021.2024 <- no.clust.sf.cln3 %>%
+  filter(Year %in% c(2021:2024)) %>%
+  # Nordic264 rope, 45min, 3.5-4.5 knots ~300m2 (15m * 20m)
+  mutate(area.op.m2 = 15*20) %>%
+  mutate(sweep.m3 = area.op.m2*dist.trvl.m) %>%
+  distinct() %>%
+  mutate(Density.kg.m3 = Total_W/sweep.m3,
+         Density.g.m3 = Density.kg.m3*1000,
+         Density.n.m3 = NBRE_sm/sweep.m3) %>%
+  distinct()
+
+# View(no.clust.sf.2021.2024)
+
+write_sf(no.clust.sf.2021.2024, 
+         file.path(paste(dir, "/Data/Shapefiles/no.clust.sf.2021.2024.shp", 
+                         sep = "")),
+         overwrite = TRUE)
+
+```

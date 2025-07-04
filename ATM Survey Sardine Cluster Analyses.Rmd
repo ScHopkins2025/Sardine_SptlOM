@@ -964,6 +964,34 @@ area.transects.final <- rbind(area.transects.d, area.transects.n) %>%
 dim(area.transects.final)
 # [1] 25488  41
 
+#-------------------------------------------------------------------------------
+# Remove unnecessary columns
+#-------------------------------------------------------------------------------
+
+area.transects.final <- area.transects.final %>%
+  select(-c(haulback_time.utc, equilibrium_time.utc, haulback_time.pacific,
+            beginTransect, endTransect, subsample_count, subsample_weight,
+            itis_tsn, remaining_weight, Species_weight))
+
+#-------------------------------------------------------------------------------
+# Adjust names for clarity
+#-------------------------------------------------------------------------------
+
+names(area.transects.final) <- c("cruise", "ship", "haul", "collection",
+                                "init_lat", "init_lon", "end_lat", "end_lon",
+                                "sciname", "weight", "specimen_i,", "length_cm",
+                                "geometry", "datetimePC", "age", "len_bin",
+                                "WGHT_bin", "NBRE_bin", "NBRE_samp", "Total_W",
+                                "WghtLenBin","Year","Month", "tim_stp", "keys",
+                                "date", "latCntr", "lonCntr", "sunrisePC",
+                                "sunsetPC", "clstGRP")      
+
+
+write_sf(area.transects.final, 
+         file.path(paste(dir, "/Data/Shapefiles/area.transects.pre-step.shp", 
+                         sep = "")),
+         overwrite = TRUE)
+
 ```
 
 ## Create 100 m Buffer distance per haul
@@ -982,30 +1010,8 @@ area.transects.buff <- st_buffer(area.transects.final, units::as_units(100,"m"),
 identical(area.transects.final$geometry, area.transects.buff$geometry)
 # [1] FALSE
 
-#-------------------------------------------------------------------------------
-# Adjust names for clarity
-#-------------------------------------------------------------------------------
-
-colnames(area.transects.buff)
-
-# Remove unnecessary columns
-area.transects.buff <- area.transects.buff %>%
-  select(-c(haulback_time.utc, haulback_time.pacific, equilibrium_time.utc,
-            beginTransect, endTransect, subsample_count, subsample_weight,
-            itis_tsn, remaining_weight, Species_weight))
-
-# Shorten the names 
-names(area.transects.buff) <- c("cruise", "ship", "haul", "collection",
-                                "init_lat", "init_lon", "end_lat", "end_lon",
-                                "sciname", "weight", "specimen_i,", "length_cm",
-                                "geometry", "datetimePC", "age", "len_bin",
-                                "WGHT_bin", "NBRE_bin", "NBRE_samp", "Total_W",
-                                "WghtLenBin","Year","Month", "tim_stp", "keys",
-                                "date", "latCntr", "lonCntr", "sunrisePC",
-                                "sunsetPC", "clstGRP")
-
 write_sf(area.transects.buff, 
-         file.path(paste(dir, "/Data/Shapefiles/area.transects.pre-step.shp", 
+         file.path(paste(dir, "/Data/Shapefiles/area.transects.w.buffer.shp", 
                          sep = "")),
          overwrite = TRUE)
 
@@ -1020,7 +1026,7 @@ This gives us area and the square km of the clusters.
 ```{r, group.hauls.by.cluster.pt1}
 
 test.area.transects.prestep <- 
-  read_sf(file.path(paste(dir, "/Data/Shapefiles/area.transects.pre-step.shp", 
+  read_sf(file.path(paste(dir, "/Data/Shapefiles/area.transects.w.buffer.shp", 
                           sep = "")
                     ))
 
@@ -1245,12 +1251,12 @@ dim(areaTranBuff.polygons.summary)
 
 #-------------------------------------------------------------------------------
 # Summarize the the corresponding months and days sampled
-# per season and night or day sampling
+# per Year
 #-------------------------------------------------------------------------------
 
 Hauls.N <- areaTranBuff.polygons.summary %>%
   # Group Year, Season and night or day trawls
-  group_by(tim_stp, clstGRP) %>% 
+  group_by(Year) %>% 
   arrange(MonthDay.num, .by_group = TRUE) %>%
   mutate(MonthDay = paste(first(MonthDay), "-", last(MonthDay))) %>%
   ungroup() %>%
@@ -1278,12 +1284,12 @@ Hauls.N2 <- Hauls.N %>%
     minLAT = min(st_coordinates(geometry)[, "Y"]),
     # Extract the greatest latitude from the transect key
     maxLAT = max(st_coordinates(geometry)[, "Y"]),
-    #minLAT = min(as.numeric(tail(str_extract_all(keys, "\\d+\\.\\d+")[[1]], 2))),
-    # Extract the greatest latitude from the transect key
-    #maxLAT = max(as.numeric(tail(str_extract_all(keys, "\\d+\\.\\d+")[[1]], 2))),
     NbClust = NbClust,
     Hauls = Hauls,
     Absent_hauls = sum(is.na(len_bin))) %>%
+  ungroup() %>%
+  st_drop_geometry() %>%
+  group_by(Year) %>%
     mutate(
       Latitudes = if (first(minLAT) == first(maxLAT)) {
       minLAT
@@ -1305,7 +1311,6 @@ Hauls.N2 <- Hauls.N %>%
         as.character(first(Area_nmi2))
       }) %>%
   ungroup() %>%
-  st_drop_geometry() %>%
   # Remove individual measure observations
   select(-c(minLAT, maxLAT, Area_km2, Area_nmi2, keys)) %>%
   distinct()
@@ -1329,7 +1334,7 @@ If there are presence observations, find length range. Note that if more than on
 #-------------------------------------------------------------------------------
 
 Hauls.N.p1 <- Hauls.N2 %>% 
-  group_by(tim_stp, clstGRP) %>%
+  group_by(Year) %>%
   filter(n() == 1 & !is.na(len_bin)) 
 
 if (nrow(Hauls.N.p1) != 0){
@@ -1350,7 +1355,7 @@ if (nrow(Hauls.N.p1) != 0){
 #-------------------------------------------------------------------------------
 
 Hauls.N.p2 <- Hauls.N2 %>% 
-  group_by(tim_stp, clstGRP) %>%
+  group_by(Year) %>%
   filter(n() > 1 & !is.na(len_bin)) %>%
       mutate(Lengths = paste(min(na.omit(len_bin)), " - ",
                          max(na.omit(len_bin)), 
@@ -1425,11 +1430,10 @@ sort(unique(Hauls.N3$Year))
 Hauls.N3 <- Hauls.N3 %>%
   distinct()
 
-EntryID <- seq_len(length(unique(Hauls.N3$Year)))
-Year <- as.numeric(substr(unique(Hauls.N3$Year),1,4))
+EntryID <- sort(as.numeric(seq_len(length(unique(Hauls.N3$Year)))))
+Year <- sort(as.numeric(substr(unique(Hauls.N3$Year),1,4)))
           
 EntryID.df <- data.frame(EntryID, Year)
-EntryID.df$Year <- EntryID.df$Year
           
 #-------------------------------------------------------------------------------  
 # Put everything together

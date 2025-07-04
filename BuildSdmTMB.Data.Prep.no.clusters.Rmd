@@ -90,8 +90,6 @@ land.barrier <- read_sf(here(dir, "Data", "Shapefiles", "land.barrier.shp"))
 
 plot(land.barrier)
 
-
-
 ```
 
 # Regroup data 2 Seasons
